@@ -29,9 +29,35 @@ Click a tab to peek at its commands while collapsed.
 | GeoJSON (`.geojson`, `.json`) | Yes | Yes |
 | CSV (`.csv`, `.txt`) with longitude/latitude columns | Yes | Yes |
 | Shapefile (`.shp` + `.dbf`) | Yes | No |
+| GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
+| ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
 | RustGIS project (`.rgisx`) | Yes | Yes |
 
-Coordinates are WGS 84 longitude/latitude and are displayed in Web Mercator.
+Vector coordinates are WGS 84 longitude/latitude and are displayed in Web Mercator. Rasters keep
+their own coordinate system (any EPSG code, such as UTM zones or national grids) and are
+reprojected on the fly as they draw.
+
+## Rasters
+
+Add a GeoTIFF or an ASCII grid with **Add Data**, by dropping it on the window, or in the web app
+by picking it. An ASCII grid takes its coordinate system from a `.prj` file next to it that names an EPSG code;
+otherwise, and always in the web app, which only sees the one file, it must be in
+longitude/latitude degrees. Exporting a raster opened from an overview writes that overview.
+GeoTIFFs may be grey, RGB(A), palette or multiband, of any pixel type, tiled or striped, and
+compressed with Deflate, LZW, PackBits or JPEG. A raster too large to hold in memory (more than
+120 million samples) opens from its largest overview that fits.
+
+Selecting a raster layer in Contents shows the **Raster Layer** tab group:
+
+| Tab › Group | Controls |
+| --- | --- |
+| Raster Layer › Visibility Range, Effects | Scale range, transparency |
+| Raster Layer › Rendering | **Symbology**: Stretch, RGB, Classify, Unique Values, Colormap, Shaded Relief; **Stretch Type**: None, Minimum Maximum, Percent Clip, Standard Deviation, Histogram Equalize; **DRA** (stretch the pixels in view); **Resampling** (nearest or bilinear); **Band Combination** (natural colour, colour infrared, or any bands) |
+| Raster Layer › Enhancement | Brightness, contrast, gamma |
+| Data | Raster information (size, bands, statistics, coordinate system) and Export Raster (GeoTIFF) |
+
+Clicking a raster with the Explore tool shows its pixel values. Projects remember a raster's file
+path and reopen it; rasters added in the browser are stored inside the project.
 
 ## Symbology
 
