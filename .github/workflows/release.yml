@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Build-only trial run, started by the Release dry run workflow (or by hand)
+  # before a tag is cut. Uploads to the GitHub Release are gated on the
+  # `release` event, so it builds the same packages and keeps them as workflow
+  # artifacts only.
+  workflow_dispatch:
+
+# Read-only by default; only the release-only publish job can write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+          - name: Linux arm64
+            os: ubuntu-22.04-arm
+          - name: Windows x64
+            os: windows-latest
+          - name: macOS Apple Silicon
+            os: macos-latest
+          - name: macOS Intel
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version
+        id: version
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # The version in [workspace.package]. A pre-release tag (v0.2.0-rc.1) needs the same
+          # pre-release version in Cargo.toml.
+          crate="$(awk '/^\[/ { s = ($0 == "[workspace.package]") } s && /^version *=/ { gsub(/.*= *"|".*/, ""); print; exit }' Cargo.toml)"
+          version="${TAG:-$crate}"
+          version="${version#v}"
+          # A tag must match the workspace version, so the app reports what was released.
+          if [ -n "$TAG" ] && [ "$version" != "$crate" ]; then
+            echo "::error::Tag $TAG does not match the workspace version $crate in Cargo.toml."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p rustgis -p rustgis-cli
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: packaging/package.sh "$VERSION"
+
+      - name: Check the .deb installs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./dist/rustgis_*.deb
+          dpkg-deb -f dist/rustgis_*.deb Depends
+          rustgis-cli logo "$RUNNER_TEMP/logo.png" --size 64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustgis-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  checksums:
+    name: Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- * | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rustgis-sha256sums
+          path: dist/SHA256SUMS
+
+  publish:
+    name: Attach to GitHub Release
+    if: github.event_name == 'release'
+    needs: checksums
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
