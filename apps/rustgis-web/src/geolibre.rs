@@ -29,9 +29,40 @@ function tools() {
   }
   return ready;
 }
+// Listing the manifests runs the runner synchronously (seconds of a blocked page), so the list
+// is kept in the browser's cache under the runner's versioned URL and read from there on later
+// visits. The runner itself loads only when a tool runs.
+// The suffix changes when RustGIS reads the list differently.
+const MANIFESTS = `${BASE}/manifests.json?v=1`;
+async function manifestCache() {
+  try { return await caches.open("rustgis-geolibre"); } catch (_) { return null; }
+}
 export async function geolibre_manifests() {
+  const cache = await manifestCache();
+  try {
+    const hit = cache && await cache.match(MANIFESTS);
+    if (hit) {
+      const text = await hit.text();
+      const list = JSON.parse(text);
+      if (Array.isArray(list) && list.length > 0) return text;
+    }
+  } catch (_) {
+    // A damaged entry is listed again below, and the put replaces it.
+  }
   const t = await tools();
-  return JSON.stringify(await t.listManifests());
+  const list = await t.listManifests();
+  const text = JSON.stringify(list);
+  // An empty list isn't kept (it would hide the tools on every later visit), and the lists of
+  // earlier runner versions are dropped.
+  try {
+    if (cache && list.length > 0) {
+      await cache.put(MANIFESTS, new Response(text, { headers: { "content-type": "application/json" } }));
+      for (const old of await cache.keys()) {
+        if (old.url !== MANIFESTS) await cache.delete(old);
+      }
+    }
+  } catch (_) {}
+  return text;
 }
 export async function geolibre_run(tool, argv, names, datas) {
   const t = await tools();
