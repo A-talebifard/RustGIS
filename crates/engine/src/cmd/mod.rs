@@ -20,6 +20,7 @@ pub mod raster;
 pub mod report;
 pub mod select;
 pub mod share;
+pub mod tiles;
 pub mod view;
 pub mod workflows;
 pub mod workspace;
@@ -32,6 +33,7 @@ pub fn all() -> Vec<CommandSpec> {
     let mut v = Vec::new();
     v.extend(project::commands());
     v.extend(navigate::commands());
+    v.extend(tiles::commands());
     v.extend(layer::commands());
     v.extend(raster::commands());
     v.extend(select::commands());
