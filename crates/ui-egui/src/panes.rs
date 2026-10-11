@@ -523,6 +523,62 @@ pub struct GpForm {
     pub last: Option<(bool, Vec<String>)>,
     /// A GeoLibre runner install in progress (it runs on a background thread).
     pub install: Option<std::sync::Arc<std::sync::Mutex<Install>>>,
+    /// The browser's GeoLibre tools loading.
+    pub web_load: Option<crate::Slot<Result<String, String>>>,
+    /// A tool running in the browser's GeoLibre runner: its run id, and where the result lands.
+    pub web_run: Option<(u64, &'static str, crate::Slot<rustgis_engine::cmd::gp::ExternalOutput>)>,
+}
+
+/// Starts loading the browser's GeoLibre tools (the runner downloads once, then the browser
+/// caches it).
+pub fn start_geolibre_load(app: &mut RustGisApp) {
+    if app.gp.web_load.is_some() {
+        return;
+    }
+    let Some(load) = &app.services.geolibre_manifests else { return };
+    let slot = crate::Slot::default();
+    load(slot.clone());
+    app.gp.web_load = Some(slot);
+}
+
+fn take<T>(slot: &crate::Slot<T>) -> Option<T> {
+    slot.lock().ok().and_then(|mut s| s.take())
+}
+
+/// Picks up what the browser's GeoLibre runner finished: the tool list, or a tool run.
+pub fn poll_geolibre(app: &mut RustGisApp, ctx: &egui::Context) {
+    if let Some(r) = app.gp.web_load.as_ref().and_then(take) {
+        app.gp.web_load = None;
+        match r.and_then(|json| rustgis_engine::cmd::gp::external_load_manifests(&json)) {
+            Ok(_) => {
+                if let Some(save) = &app.services.save_pref {
+                    save("geolibre_web", "on");
+                }
+            }
+            Err(e) => app.gp.last = Some((false, vec![e])),
+        }
+    }
+    if let Some((id, tool, out)) = app.gp.web_run.as_ref().and_then(|(id, tool, slot)| take(slot).map(|o| (*id, *tool, o))) {
+        app.gp.web_run = None;
+        let r = rustgis_engine::cmd::gp::external_complete(&mut app.session, id, out).and_then(|_| app.run("gp.finish", json!({"id": id})));
+        let last = match r {
+            Ok(_) => (true, app.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
+            Err(e) => (false, vec![e]),
+        };
+        // Under its own form only; with another tool open, a notification says how it went.
+        if app.gp.tool == Some(tool) {
+            app.gp.last = Some(last);
+        } else if !last.0 {
+            app.session.notify(last.1.join("\n"), true);
+        } else {
+            let name = rustgis_engine::analysis::tool(tool).map(|t| t.name).unwrap_or(tool);
+            app.session.notify(crate::i18n::fmt("Finished: {tool}", &[("tool", tl!(name))]), false);
+        }
+        app.map.invalidate();
+    }
+    if app.gp.web_load.is_some() || app.gp.web_run.is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
 }
 
 /// Progress of a one-click GeoLibre runner install.
@@ -591,6 +647,10 @@ fn geolibre_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
         return;
     }
+    if status["web"] == true {
+        geolibre_web_card(app, ui, t);
+        return;
+    }
     let download = status["download"].as_str().unwrap_or("https://github.com/opengeos/geolibre-rust/releases/latest").to_string();
     ui.add_space(6.0);
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(10)).show(
@@ -618,14 +678,7 @@ fn geolibre_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 }
                 None => {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(tl!("Install GeoLibre tools")).color(egui::Color32::WHITE))
-                                .fill(t.green)
-                                .corner_radius(CornerRadius::same(6)),
-                        )
-                        .clicked()
-                    {
+                    if crate::widgets::primary_button(ui, tl!("Install GeoLibre tools"), true, vec2(0.0, 28.0)).clicked() {
                         let st = std::sync::Arc::new(std::sync::Mutex::new(Install::default()));
                         app.gp.install = Some(st.clone());
                         app.gp.last = None;
@@ -672,6 +725,41 @@ fn geolibre_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         },
     );
+}
+
+/// The browser's version of the card: load the WASI runner's tools.
+fn geolibre_web_card(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    ui.add_space(6.0);
+    egui::Frame::NONE
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(tl!("GeoLibre tools")).font(semibold(13.0)));
+            ui.label(
+                egui::RichText::new(tl!(
+                    "Over 1,000 raster, vector, LiDAR, hydrology and terrain tools that run in the browser, from a one-time download of about 25 MB."
+                ))
+                .size(11.5)
+                .color(t.text_dim),
+            );
+            ui.add_space(6.0);
+            if app.gp.web_load.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new(tl!("Loading the GeoLibre tools…")).size(11.5));
+                });
+            } else if crate::widgets::primary_button(ui, tl!("Load GeoLibre tools"), true, vec2(0.0, 28.0)).clicked() {
+                app.gp.last = None;
+                start_geolibre_load(app);
+            }
+            if let Some((false, msgs)) = &app.gp.last {
+                for m in msgs {
+                    ui.label(egui::RichText::new(m).size(11.0).color(t.red));
+                }
+            }
+        });
 }
 
 fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
@@ -752,19 +840,42 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         if q.is_empty() {
             geolibre_section(app, ui);
         }
-        let mut boxes: Vec<&str> = rustgis_engine::analysis::TOOLS.iter().map(|t| t.toolbox).collect();
-        boxes.sort();
-        boxes.dedup();
-        for b in boxes {
-            let found: Vec<_> = rustgis_engine::analysis::TOOLS.iter().filter(|x| x.toolbox == b && matches(x)).collect();
-            if found.is_empty() {
-                continue;
-            }
-            ui.label(egui::RichText::new(crate::i18n::location(b)).size(11.0).color(t.text_dim));
-            for tool in found {
-                row(app, ui, tool);
+        let builtin = rustgis_engine::analysis::TOOLS;
+        if q.is_empty() {
+            // Browsing: one collapsible toolbox per top-level group, like the GeoLibre ones
+            // (open: there are only a few built-in tools).
+            ui.label(egui::RichText::new(tl!("RustGIS")).size(11.0).color(t.text_dim));
+            let mut tops: Vec<&str> = builtin.iter().map(|t| t.toolbox.split(" › ").next().unwrap_or(t.toolbox)).collect();
+            tops.sort();
+            tops.dedup();
+            for top in tops {
+                let in_top: Vec<_> = builtin.iter().filter(|x| x.toolbox.split(" › ").next() == Some(top)).collect();
+                egui::CollapsingHeader::new(format!("{} ({})", crate::i18n::location(top), in_top.len()))
+                    .id_salt(("gp-builtin", top))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for tool in in_top {
+                            row(app, ui, tool);
+                        }
+                    });
             }
             ui.add_space(6.0);
+        } else {
+            // Searching: the matches under their toolbox.
+            let mut boxes: Vec<&str> = builtin.iter().map(|t| t.toolbox).collect();
+            boxes.sort();
+            boxes.dedup();
+            for b in boxes {
+                let found: Vec<_> = builtin.iter().filter(|x| x.toolbox == b && matches(x)).collect();
+                if found.is_empty() {
+                    continue;
+                }
+                ui.label(egui::RichText::new(crate::i18n::location(b)).size(11.0).color(t.text_dim));
+                for tool in found {
+                    row(app, ui, tool);
+                }
+                ui.add_space(6.0);
+            }
         }
         if !q.is_empty() {
             geolibre_section(app, ui);
@@ -773,7 +884,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     // Tool form.
     ui.horizontal(|ui| {
-        if ui.button(tl!("←")).on_hover_text(tl!("Back to tools")).clicked() {
+        if crate::widgets::icon_button(ui, "back", tl!("Back to tools")).clicked() {
             app.gp.tool = None;
         }
         let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
@@ -884,11 +995,8 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     }
     ui.add_space(8.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-        let run = egui::Button::new(egui::RichText::new(tl!("Run")).font(semibold(13.0)).color(egui::Color32::WHITE))
-            .fill(t.green)
-            .min_size(vec2(96.0, 30.0))
-            .corner_radius(CornerRadius::same(6));
-        if ui.add(run).clicked() {
+        // One browser run at a time.
+        if crate::widgets::primary_button(ui, tl!("Run"), app.gp.web_run.is_none(), vec2(96.0, 30.0)).clicked() {
             let mut params = serde_json::Map::new();
             for p in spec.params {
                 if let Some(v) = app.gp.values.get(p.name).filter(|v| !v.trim().is_empty()) {
@@ -900,14 +1008,37 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     params.insert(p.name.to_string(), val);
                 }
             }
-            let r = app.run("gp.run", json!({"tool": spec.id, "params": Value::Object(params)}));
-            app.gp.last = Some(match r {
-                Ok(_) => (true, app.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
-                Err(e) => (false, vec![e]),
-            });
-            app.map.invalidate();
+            let params = Value::Object(params);
+            if rustgis_engine::analysis::is_external(spec) && app.services.geolibre_run.is_some() {
+                // The browser's runner is asynchronous: start it, and `poll_geolibre` finishes.
+                match rustgis_engine::cmd::gp::external_start(&mut app.session, spec.id, &params) {
+                    Ok(run) => {
+                        let (id, slot) = (run.id, crate::Slot::default());
+                        if let Some(start) = &app.services.geolibre_run {
+                            start(run, slot.clone());
+                        }
+                        app.gp.web_run = Some((id, spec.id, slot));
+                        app.gp.last = None;
+                    }
+                    Err(e) => app.gp.last = Some((false, vec![e])),
+                }
+            } else {
+                let r = app.run("gp.run", json!({"tool": spec.id, "params": params}));
+                app.gp.last = Some(match r {
+                    Ok(_) => (true, app.session.project.gp_history.last().map(|h| h.messages.clone()).unwrap_or_default()),
+                    Err(e) => (false, vec![e]),
+                });
+                app.map.invalidate();
+            }
         }
     });
+    if app.gp.web_run.is_some() {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(egui::RichText::new(tl!("Running…")).size(12.0));
+        });
+    }
     if let Some((ok, msgs)) = &app.gp.last {
         ui.add_space(8.0);
         let (fill, stroke, head) =
