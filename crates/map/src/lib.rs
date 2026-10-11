@@ -3,11 +3,13 @@
 
 pub mod camera;
 pub mod color;
+pub mod globe;
 pub mod raster;
 pub mod symbology;
 
 pub use camera::Camera;
 pub use color::{Ramp, Rgba};
+pub use globe::{Globe, Projection};
 pub use raster::{RasterLayer, RasterRenderer, RasterStyle, Resampling, Stretch};
 pub use symbology::{ClassMethod, Labeling, Marker, Renderer, Symbol};
 
@@ -164,6 +166,12 @@ impl Layer {
         &self.projected
     }
 
+    /// The Web Mercator copies from the last [`Layer::projected`] call, without refreshing them:
+    /// call `projected` first (it needs `&mut self`) whenever the geometry may have changed.
+    pub fn projected_cache(&self) -> &[Option<Geometry>] {
+        &self.projected
+    }
+
     /// Marks geometry as changed.
     pub fn touch_geometry(&mut self) {
         self.geometry_rev = self.geometry_rev.wrapping_add(1);
@@ -224,6 +232,9 @@ pub struct Map {
     pub bookmarks: Vec<Bookmark>,
     #[serde(default = "yes")]
     pub graticule: bool,
+    /// Flat map or 3D globe.
+    #[serde(default)]
+    pub projection: Projection,
     #[serde(default)]
     next_layer_id: u32,
 }
@@ -237,6 +248,7 @@ impl Map {
             camera: Camera::world(),
             bookmarks: Vec::new(),
             graticule: true,
+            projection: Projection::WebMercator,
             next_layer_id: 1,
         }
     }
