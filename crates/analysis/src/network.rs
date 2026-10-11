@@ -234,7 +234,10 @@ pub struct FieldProfile {
     pub ty: String,
     pub count: usize,
     pub nulls: usize,
+    /// Distinct values, counted until 100,000 are seen (`truncated` says counting stopped there,
+    /// so `distinct` and `top` cover only the rows before).
     pub distinct: usize,
+    pub truncated: bool,
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub mean: Option<f64>,
@@ -250,6 +253,7 @@ pub fn profile_fields(ds: &Dataset) -> Vec<FieldProfile> {
             let mut counts: HashMap<String, usize> = HashMap::new();
             let (mut nulls, mut sum, mut n_num) = (0usize, 0.0, 0usize);
             let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+            let mut truncated = false;
             for r in 0..ds.features.len() {
                 let v = ds.value(r, fi);
                 if v.is_null() {
@@ -262,9 +266,15 @@ pub fn profile_fields(ds: &Dataset) -> Vec<FieldProfile> {
                     min = min.min(x);
                     max = max.max(x);
                 }
-                if counts.len() < 100_000 {
-                    *counts.entry(v.to_string()).or_insert(0) += 1;
+                // Past the cap, counting stops (no text is made for the remaining rows).
+                if truncated {
+                    continue;
                 }
+                if counts.len() >= 100_000 {
+                    truncated = true;
+                    continue;
+                }
+                *counts.entry(v.to_string()).or_insert(0) += 1;
             }
             let mut top: Vec<(String, usize)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
             top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -275,6 +285,7 @@ pub fn profile_fields(ds: &Dataset) -> Vec<FieldProfile> {
                 count: ds.features.len(),
                 nulls,
                 distinct: counts.len(),
+                truncated,
                 min: (n_num > 0).then_some(min),
                 max: (n_num > 0).then_some(max),
                 mean: (n_num > 0).then(|| sum / n_num as f64),

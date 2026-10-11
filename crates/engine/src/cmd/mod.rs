@@ -3,8 +3,10 @@
 pub mod clipboard;
 pub mod design;
 pub mod edit;
+pub mod effects;
 pub mod gp;
 pub mod graphics;
+pub mod imagery;
 pub mod items;
 pub mod labels;
 pub mod layer;
@@ -35,6 +37,8 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(items::commands());
     v.extend(design::commands());
     v.extend(workflows::commands());
+    v.extend(effects::commands());
+    v.extend(imagery::commands());
     v.extend(gp::commands());
     v.extend(share::commands());
     v
@@ -46,6 +50,12 @@ pub(crate) fn ps<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
 
 pub(crate) fn f(p: &Value, k: &str) -> Option<f64> {
     p.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))).filter(|x: &f64| x.is_finite())
+}
+
+/// A whole number from an integer, a float with no fraction, or a numeric string (forms send
+/// numbers as floats).
+pub(crate) fn uint(p: &Value, k: &str) -> Option<u64> {
+    f(p, k).filter(|x| *x >= 0.0 && x.fract() == 0.0 && *x <= u64::MAX as f64).map(|x| x as u64)
 }
 
 pub(crate) fn b(p: &Value, k: &str) -> Option<bool> {
