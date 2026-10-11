@@ -185,7 +185,9 @@ Distance	Afstand
 Double	Decimaal getal
 Double-click	Dubbelklik
 Double-click to add	Dubbelklik om toe te voegen
+Download the GeoLibre runner	GeoLibre-runner downloaden
 Downloaded {name}	{name} gedownload
+Downloading… {mb} MB	Downloaden… {mb} MB
 DRA	DRA
 Drag / middle-drag	Slepen / slepen met middelste knop
 Drag a box or click to zoom in	Sleep een kader of klik om in te zoomen
@@ -251,6 +253,7 @@ Field	Veld
 Field name	Veldnaam
 Fields	Velden
 Fields:	Velden:
+file path	bestandspad
 Filter rows…	Rijen filteren…
 Find a place by coordinates.	Een plaats zoeken op coördinaten.
 Find and run geoprocessing tools.	Geoverwerkingsgereedschappen zoeken en uitvoeren.
@@ -267,6 +270,9 @@ Gamma	Gamma
 Generalization	Generalisatie
 Geo-\nprocessing	Geo-\nverwerking
 GeoJSON or CSV	GeoJSON of CSV
+GeoLibre	GeoLibre
+GeoLibre Tools	GeoLibre-gereedschappen
+GeoLibre tools	GeoLibre-gereedschappen
 Geometry	Geometrie
 Geoprocessing	Geoverwerking
 Geoprocessing history.	Geschiedenis van geoverwerking.
@@ -304,6 +310,8 @@ Input Summary Features	Invoerobjecten voor samenvatting
 Input Table	Invoertabel
 Inquiry	Opvragen
 Insert	Invoegen
+Install GeoLibre Tools	GeoLibre-gereedschappen installeren
+Install GeoLibre tools	GeoLibre-gereedschappen installeren
 Interface font: {font}	Interfacelettertype: {font}
 Invalid: {error}	Ongeldig: {error}
 Invert	Omkeren
@@ -335,6 +343,9 @@ LineString	LineString
 List Commands	Opdrachten weergeven
 Lit	Belicht
 Locate	Lokaliseren
+Locate GeoLibre Runner	GeoLibre-runner zoeken
+Locate the GeoLibre runner	GeoLibre-runner zoeken
+Locate…	Zoeken…
 Location	Locatie
 Long	Lang geheel getal
 Longitude (X)	Lengtegraad (X)
@@ -416,12 +427,14 @@ Open {code} on epsg.io	{code} openen op epsg.io
 Open, save and create projects	Projecten openen, opslaan en maken
 Open…	Openen…
 OR	OR
+Or	Of
 Out Beyond	Uitgezoomd voorbij
 Outline	Omtrek
 Outline color	Omtrekkleur
 Outline width	Omtrekdikte
 Output	Uitvoer
 Output Name	Uitvoernaam
+Over 1,000 raster, vector, LiDAR, hydrology and terrain tools, from an optional download of about 20 MB.	Meer dan 1.000 raster-, vector-, LiDAR-, hydrologie- en terreingereedschappen als optionele download van ongeveer 20 MB.
 Overlay	Overlay
 Pan (Explore) · any tool	Pannen (Verkennen) · elk gereedschap
 Pan to a longitude/latitude.	Pannen naar een lengte-/breedtegraad.
@@ -461,6 +474,7 @@ Redo	Opnieuw
 Redo the change you undid.	De ongedaan gemaakte wijziging opnieuw uitvoeren.
 Redo {action}	{action} opnieuw
 Red–Blue	Rood–Blauw
+Refine the search to see {n} more	Verfijn de zoekopdracht om {n} meer te zien
 Regional, equal-area: the contiguous United States.	Regionaal, oppervlaktegetrouw: de aaneengesloten Verenigde Staten.
 Regional, equal-area: the European standard for statistics.	Regionaal, oppervlaktegetrouw: de Europese standaard voor statistiek.
 Remove	Verwijderen

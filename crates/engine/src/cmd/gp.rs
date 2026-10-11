@@ -1,6 +1,6 @@
 //! Analysis tab: run geoprocessing tools and keep their history.
 
-use rustgis_analysis::{Inputs, Output};
+use rustgis_analysis::{Inputs, Output, OutputLayer, RasterInput};
 use rustgis_data::Dataset;
 use serde_json::{Value, json};
 
@@ -12,8 +12,7 @@ pub fn commands() -> Vec<C> {
         C::new("gp.run", "Run Tool", "Analysis › Geoprocessing", run).when(need_layers).params(r#"{"tool": tool id, "params": {...}}"#),
         C::new("gp.tools", "Tools", "Analysis › Geoprocessing", |_, _| {
             Ok(Value::Array(
-                rustgis_analysis::TOOLS
-                    .iter()
+                rustgis_analysis::tools()
                     .map(|t| {
                         json!({"id": t.id, "name": t.name, "toolbox": t.toolbox, "summary": t.summary,
                             "params": t.params.iter().map(|p| json!({"name": p.name, "label": p.label, "required": p.required, "kind": format!("{:?}", p.kind)})).collect::<Vec<_>>()})
@@ -22,11 +21,70 @@ pub fn commands() -> Vec<C> {
             ))
         })
         .view(),
+        C::new("gp.geolibre", "GeoLibre Tools", "Analysis › Geoprocessing", |_, _| Ok(geolibre_status())).view(),
+        C::new("gp.installGeolibre", "Install GeoLibre Tools", "Analysis › Geoprocessing", |_, _| {
+            let path = install_geolibre(&|_, _| {})?;
+            #[cfg(feature = "geolibre")]
+            rustgis_geolibre::set_runner(Some(std::path::PathBuf::from(&path)))?;
+            Ok(json!({"path": path, "status": geolibre_status()}))
+        })
+        .view(),
+        C::new("gp.setGeolibre", "Locate GeoLibre Runner", "Analysis › Geoprocessing", set_geolibre)
+            .view()
+            .params(r#"{"path"?: "the geolibre executable (empty: look in the usual places)"}"#),
         C::new("gp.clearHistory", "Clear History", "Analysis › Geoprocessing › History", |s, _| {
             s.project.gp_history.clear();
             Ok(Value::Null)
         }),
     ]
+}
+
+/// Whether the GeoLibre tools are available: the runner in use, its version and tool count.
+pub fn geolibre_status() -> Value {
+    #[cfg(feature = "geolibre")]
+    {
+        let found = rustgis_geolibre::runner::find();
+        json!({
+            "supported": true,
+            "available": found.is_some(),
+            "path": found.as_ref().map(|(p, _)| p.display().to_string()),
+            "version": found.map(|(_, v)| v),
+            "tools": rustgis_analysis::external_tools().len(),
+            "download": rustgis_geolibre::runner::DOWNLOAD_URL,
+        })
+    }
+    #[cfg(not(feature = "geolibre"))]
+    json!({"supported": false, "available": false})
+}
+
+/// Downloads and installs the latest GeoLibre runner for this platform; returns the program's
+/// path. `progress` gets the bytes received and the expected total. Blocks: the app calls it
+/// from a background thread, then picks the runner with `gp.setGeolibre`.
+pub fn install_geolibre(progress: &dyn Fn(u64, Option<u64>)) -> Result<String, String> {
+    #[cfg(feature = "geolibre")]
+    {
+        rustgis_geolibre::install::install(progress).map(|p| p.display().to_string())
+    }
+    #[cfg(not(feature = "geolibre"))]
+    {
+        let _ = progress;
+        Err("this build doesn't include the GeoLibre tools".into())
+    }
+}
+
+/// Chooses the GeoLibre runner (an optional download), or looks for it again.
+fn set_geolibre(_s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(feature = "geolibre")]
+    {
+        let path = ps(p, "path").map(str::trim).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+        rustgis_geolibre::set_runner(path)?;
+        Ok(geolibre_status())
+    }
+    #[cfg(not(feature = "geolibre"))]
+    {
+        let _ = p;
+        Err("this build doesn't include the GeoLibre tools".into())
+    }
 }
 
 struct MapInputs<'a>(&'a rustgis_map::Map, &'a [Dataset]);
@@ -37,6 +95,14 @@ impl Inputs for MapInputs<'_> {
     }
     fn selection(&self, layer: &str) -> &[usize] {
         self.0.layer_by_name(layer).map(|l| l.selection.as_slice()).unwrap_or(&[])
+    }
+    fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
+        let rl = self.0.layer_by_name(layer)?.raster.as_ref()?;
+        Some(RasterInput {
+            raster: rl.data.as_deref()?,
+            path: rl.path.as_deref(),
+            embedded: rl.embedded.as_deref().map(|b| (rl.file_name.as_deref().unwrap_or("raster.tif"), b.as_slice())),
+        })
     }
 }
 
@@ -51,7 +117,7 @@ fn run(s: &mut Session, p: &Value) -> CmdResult {
     let res = rustgis_analysis::run(&tool, &MapInputs(s.map(), &s.project.tables), &params);
     let millis = now_ms().saturating_sub(t0);
     let name = rustgis_analysis::tool(&tool).map(|t| t.name).unwrap_or("Tool").to_string();
-    let result = match res {
+    let mut result = match res {
         Err(e) => {
             s.project.gp_history.push(GpRecord { tool: name, params, ok: false, messages: vec![e.clone()], millis });
             return Err(e);
@@ -80,6 +146,36 @@ fn run(s: &mut Session, p: &Value) -> CmdResult {
             s.project.tables.retain(|x| x.name != n);
             s.project.tables.push(t);
             json!({"table": n})
+        }
+        Output::Layers(outputs) => {
+            let mut layers = Vec::new();
+            let mut tables = Vec::new();
+            for o in outputs {
+                match o {
+                    OutputLayer::Vector(ds) => layers.push(super::layer::add_dataset(s, ds)),
+                    OutputLayer::Raster { name, file_name, bytes } => {
+                        // One unreadable output doesn't undo the others: it's reported instead.
+                        let added = rustgis_data::raster::read_bytes(&file_name, &bytes)
+                            .map_err(|e| format!("{name}: {e}"))
+                            .and_then(|r| super::raster::add_raster(s, &name, rustgis_map::RasterLayer::from_bytes(r, file_name, bytes)));
+                        match added {
+                            Ok(v) => {
+                                if let Some(id) = v.get("layer").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) {
+                                    layers.push(id);
+                                }
+                            }
+                            Err(e) => result.messages.push(e),
+                        }
+                    }
+                    OutputLayer::Table(t) => {
+                        let n = t.name.clone();
+                        s.project.tables.retain(|x| x.name != n);
+                        s.project.tables.push(t);
+                        tables.push(n);
+                    }
+                }
+            }
+            json!({"layers": layers, "tables": tables})
         }
     };
     for m in &result.messages {

@@ -126,6 +126,53 @@ gdp_md IS NULL
 
 Tools honour the current selection: with features selected, only those are processed.
 
+### GeoLibre tools
+
+The desktop app and the command line can also run the
+[GeoLibre](https://github.com/opengeos/geolibre-rust) tool suite: over 1,000 tools from
+Whitebox and GeoLibre for terrain analysis (slope, aspect, hillshade, curvature), hydrology
+(fill depressions, flow direction and accumulation, watersheds), image processing,
+interpolation and vector work. They run on the map's layers and add their outputs as new
+layers.
+
+The suite is an optional download, so RustGIS itself stays small: the **GeoLibre runner**, a
+single `geolibre` program (about 20 MB to download). In the Geoprocessing pane, click
+**Install GeoLibre tools** under *GeoLibre tools*: RustGIS downloads the latest runner for your
+platform from the [geolibre-rust releases](https://github.com/opengeos/geolibre-rust/releases/latest),
+checks it against its published SHA-256 checksum (which catches a corrupted download; the
+release itself is trusted as when you download it by hand) and installs it in its data folder
+(`~/.local/share/rustgis/geolibre` on Linux, `~/Library/Application Support/RustGIS/geolibre`
+on macOS, `%LOCALAPPDATA%\RustGIS\geolibre` on Windows). From the command line,
+`gp.installGeolibre` does the same.
+
+To install it yourself instead, download the archive for your platform
+(`geolibre-<version>-<platform>.tar.gz`, or `.zip` on Windows), unpack it anywhere, and click
+**Locate…** to pick the `geolibre` program; RustGIS remembers it.
+
+RustGIS also finds the runner without asking when it is next to the RustGIS program (or in a
+`geolibre` folder beside it), on your `PATH`, or named by the `RUSTGIS_GEOLIBRE` environment
+variable (the command line uses these). The tools then appear under **GeoLibre › Raster,
+Vector, Lidar, Hydrology, Terrain, Conversion** in the Geoprocessing pane and the Catalog's
+toolboxes, and Find Tools searches them.
+
+- Raster inputs are passed as their own files; vector layers (or their selection) are written
+  in the first raster input's coordinate system, or the UTM zone around the data, so distances
+  and areas are in metres. Data spanning more than 40° of longitude stays in degrees.
+- Raster outputs are kept inside the project, so they save and reopen with it. Text and table
+  reports appear in the tool's messages.
+- LiDAR and other inputs RustGIS doesn't open as layers take a file path, read like Add Data
+  reads one. Outputs are written to a fresh scratch folder and loaded from there.
+- Each run is a separate `geolibre` process, so a tool that fails can't take RustGIS down.
+- From the command line: `gp.run={"tool":"geolibre:slope","params":{"input":"dem"}}`;
+  `gp.tools` lists every tool's parameters, `gp.geolibre` shows the runner in use and
+  `gp.setGeolibre={"path":"…"}` picks one.
+
+The web app doesn't include them: RustGIS turns this integration on only in the desktop app
+and the command line.
+
+RustGIS waits while a tool runs, so a long run on a large raster or point cloud keeps the
+window busy until it finishes.
+
 ## Keyboard shortcuts
 
 | Keys | Action |

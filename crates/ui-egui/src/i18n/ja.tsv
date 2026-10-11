@@ -185,7 +185,9 @@ Distance	距離
 Double	倍精度
 Double-click	ダブルクリック
 Double-click to add	ダブルクリックで追加
+Download the GeoLibre runner	GeoLibre ランナーをダウンロード
 Downloaded {name}	{name} をダウンロードしました
+Downloading… {mb} MB	ダウンロード中… {mb} MB
 DRA	DRA
 Drag / middle-drag	ドラッグ / 中ボタン ドラッグ
 Drag a box or click to zoom in	ボックスをドラッグまたはクリックして拡大
@@ -251,6 +253,7 @@ Field	フィールド
 Field name	フィールド名
 Fields	フィールド
 Fields:	フィールド：
+file path	ファイルパス
 Filter rows…	行をフィルター…
 Find a place by coordinates.	座標で場所を検索します。
 Find and run geoprocessing tools.	ジオプロセシング ツールを検索して実行します。
@@ -267,6 +270,9 @@ Gamma	ガンマ
 Generalization	ジェネラライズ
 Geo-\nprocessing	ジオプロ\nセシング
 GeoJSON or CSV	GeoJSON または CSV
+GeoLibre	GeoLibre
+GeoLibre Tools	GeoLibre ツール
+GeoLibre tools	GeoLibre ツール
 Geometry	ジオメトリ
 Geoprocessing	ジオプロセシング
 Geoprocessing history.	ジオプロセシングの履歴。
@@ -304,6 +310,8 @@ Input Summary Features	入力集計フィーチャ
 Input Table	入力テーブル
 Inquiry	照会
 Insert	挿入
+Install GeoLibre Tools	GeoLibre ツールをインストール
+Install GeoLibre tools	GeoLibre ツールをインストール
 Interface font: {font}	インターフェイスのフォント：{font}
 Invalid: {error}	無効：{error}
 Invert	反転
@@ -335,6 +343,9 @@ LineString	ライン ストリング
 List Commands	コマンド一覧
 Lit	明部
 Locate	位置
+Locate GeoLibre Runner	GeoLibre ランナーの場所を指定
+Locate the GeoLibre runner	GeoLibre ランナーの場所を指定
+Locate…	場所を指定…
 Location	場所
 Long	長整数
 Longitude (X)	経度（X）
@@ -416,12 +427,14 @@ Open {code} on epsg.io	epsg.io で {code} を開く
 Open, save and create projects	プロジェクトを開く、保存する、作成する
 Open…	開く…
 OR	OR
+Or	または
 Out Beyond	縮小の限界
 Outline	アウトライン
 Outline color	アウトラインの色
 Outline width	アウトラインの幅
 Output	出力
 Output Name	出力名
+Over 1,000 raster, vector, LiDAR, hydrology and terrain tools, from an optional download of about 20 MB.	ラスター、ベクター、LiDAR、水文、地形の 1,000 以上のツール (約 20 MB のオプションのダウンロード)。
 Overlay	オーバーレイ
 Pan (Explore) · any tool	画面移動（マップ操作）· 任意のツール
 Pan to a longitude/latitude.	経度/緯度に画面移動します。
@@ -461,6 +474,7 @@ Redo	やり直し
 Redo the change you undid.	元に戻した変更をやり直します。
 Redo {action}	{action} をやり直す
 Red–Blue	赤–青
+Refine the search to see {n} more	検索を絞り込むと、さらに {n} 件表示されます
 Regional, equal-area: the contiguous United States.	地域、正積: アメリカ本土 48 州。
 Regional, equal-area: the European standard for statistics.	地域、正積: 統計用のヨーロッパ標準。
 Remove	削除

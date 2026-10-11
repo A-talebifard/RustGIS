@@ -185,7 +185,9 @@ Distance	Distance
 Double	Réel double
 Double-click	Double-clic
 Double-click to add	Double-cliquez pour ajouter
+Download the GeoLibre runner	Télécharger l'exécuteur GeoLibre
 Downloaded {name}	{name} téléchargé
+Downloading… {mb} MB	Téléchargement… {mb} Mo
 DRA	DRA
 Drag / middle-drag	Glisser / glisser avec le bouton du milieu
 Drag a box or click to zoom in	Tracez un rectangle ou cliquez pour zoomer
@@ -251,6 +253,7 @@ Field	Champ
 Field name	Nom du champ
 Fields	Champs
 Fields:	Champs :
+file path	chemin du fichier
 Filter rows…	Filtrer les lignes…
 Find a place by coordinates.	Trouver un lieu par ses coordonnées.
 Find and run geoprocessing tools.	Trouver et exécuter des outils de géotraitement.
@@ -267,6 +270,9 @@ Gamma	Gamma
 Generalization	Généralisation
 Geo-\nprocessing	Géo-\ntraitement
 GeoJSON or CSV	GeoJSON ou CSV
+GeoLibre	GeoLibre
+GeoLibre Tools	Outils GeoLibre
+GeoLibre tools	Outils GeoLibre
 Geometry	Géométrie
 Geoprocessing	Géotraitement
 Geoprocessing history.	Historique de géotraitement.
@@ -304,6 +310,8 @@ Input Summary Features	Entités de synthèse en entrée
 Input Table	Table en entrée
 Inquiry	Interrogation
 Insert	Insertion
+Install GeoLibre Tools	Installer les outils GeoLibre
+Install GeoLibre tools	Installer les outils GeoLibre
 Interface font: {font}	Police de l'interface : {font}
 Invalid: {error}	Non valide : {error}
 Invert	Inverser
@@ -335,6 +343,9 @@ LineString	LineString
 List Commands	Lister les commandes
 Lit	Éclairé
 Locate	Localiser
+Locate GeoLibre Runner	Localiser l'exécuteur GeoLibre
+Locate the GeoLibre runner	Localiser l'exécuteur GeoLibre
+Locate…	Localiser…
 Location	Localisation
 Long	Entier long
 Longitude (X)	Longitude (X)
@@ -416,12 +427,14 @@ Open {code} on epsg.io	Ouvrir {code} sur epsg.io
 Open, save and create projects	Ouvrir, enregistrer et créer des projets
 Open…	Ouvrir…
 OR	OR
+Or	Ou
 Out Beyond	Masquer en deçà de
 Outline	Contour
 Outline color	Couleur du contour
 Outline width	Épaisseur du contour
 Output	Sortie
 Output Name	Nom en sortie
+Over 1,000 raster, vector, LiDAR, hydrology and terrain tools, from an optional download of about 20 MB.	Plus de 1 000 outils raster, vecteur, LiDAR, hydrologie et terrain, en téléchargement facultatif d'environ 20 Mo.
 Overlay	Superposition
 Pan (Explore) · any tool	Déplacer (Explorer) · tout outil
 Pan to a longitude/latitude.	Se déplacer vers une longitude/latitude.
@@ -461,6 +474,7 @@ Redo	Rétablir
 Redo the change you undid.	Rétablir la modification annulée.
 Redo {action}	Rétablir {action}
 Red–Blue	Rouge–Bleu
+Refine the search to see {n} more	Affinez la recherche pour en voir {n} de plus
 Regional, equal-area: the contiguous United States.	Régionale, équivalente : les États-Unis contigus.
 Regional, equal-area: the European standard for statistics.	Régionale, équivalente : la norme européenne pour les statistiques.
 Remove	Supprimer
