@@ -137,7 +137,11 @@ pub fn external_start(s: &mut Session, tool: &str, params: &Value) -> Result<Ext
             .filter(|t| rustgis_analysis::is_external(t))
             .ok_or_else(|| format!("no GeoLibre tool '{tool}'"))?;
         let params = rustgis_analysis::resolve_params(spec, params)?;
-        let job = rustgis_geolibre::prepare(spec, &MapInputs(s.map(), &s.project.tables), &params)?;
+        let job = rustgis_geolibre::prepare(
+            spec,
+            &MapInputs(s.map(), &s.project.tables, env_inputs(s.map(), &s.project.gp_env, &params)?),
+            &params,
+        )?;
         s.next_pending = s.next_pending.wrapping_add(1);
         let id = s.next_pending;
         let run = ExternalRun { id, tool: job.tool.clone(), argv: job.argv("/work"), files: job.files.clone() };
@@ -193,14 +197,59 @@ fn finish(s: &mut Session, p: &Value) -> CmdResult {
     apply(s, r.tool, r.params, r.result, r.millis)
 }
 
-struct MapInputs<'a>(&'a rustgis_map::Map, &'a [Dataset]);
+struct MapInputs<'a>(&'a rustgis_map::Map, &'a [Dataset], std::collections::HashMap<String, Vec<usize>>);
+
+/// The environment's rows for a run, refusing a run whose main input has no features inside the
+/// extent (which would otherwise process everything, or nothing).
+fn env_inputs(
+    map: &rustgis_map::Map,
+    env: &crate::project::GpEnvironment,
+    params: &Value,
+) -> Result<std::collections::HashMap<String, Vec<usize>>, String> {
+    let rows = env_rows(map, env, params);
+    if let Some((name, v)) = rows.iter().next()
+        && v.is_empty()
+    {
+        return Err(format!("no features of {name} are inside the environment's extent"));
+    }
+    Ok(rows)
+}
+
+/// The rows of the tool's main input (its `input` layer) inside the environment's extent, when
+/// that layer has no selection. Overlay layers (clip, erase, join targets…) stay whole.
+fn env_rows(map: &rustgis_map::Map, env: &crate::project::GpEnvironment, params: &Value) -> std::collections::HashMap<String, Vec<usize>> {
+    let Some(e) = env.extent else { return std::collections::HashMap::new() };
+    let Some(input) = params.get("input").and_then(Value::as_str) else { return std::collections::HashMap::new() };
+    // The layer the name finds (the first of that name), as the tool will.
+    map.layer_by_name(input)
+        .into_iter()
+        .filter(|l| !l.is_raster() && l.selection.is_empty())
+        .map(|l| {
+            let rows: Vec<usize> = l
+                .dataset
+                .features
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.geometry.as_ref().is_some_and(|g| g.extent().intersects(&e)))
+                .map(|(i, _)| i)
+                .collect();
+            (l.name.to_ascii_lowercase(), rows)
+        })
+        .collect()
+}
 
 impl Inputs for MapInputs<'_> {
     fn dataset(&self, layer: &str) -> Option<&Dataset> {
         self.0.layer_by_name(layer).map(|l| &l.dataset).or_else(|| self.1.iter().find(|t| t.name.eq_ignore_ascii_case(layer)))
     }
     fn selection(&self, layer: &str) -> &[usize] {
-        self.0.layer_by_name(layer).map(|l| l.selection.as_slice()).unwrap_or(&[])
+        match self.0.layer_by_name(layer) {
+            Some(l) if !l.selection.is_empty() => &l.selection,
+            // No selection: the environment's extent picks the rows (an extent holding none is
+            // refused before the tool runs, by `env_inputs`).
+            Some(l) => self.2.get(&l.name.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or(&[]),
+            None => &[],
+        }
     }
     fn raster(&self, layer: &str) -> Option<RasterInput<'_>> {
         let rl = self.0.layer_by_name(layer)?.raster.as_ref()?;
@@ -219,8 +268,21 @@ fn now_ms() -> u64 {
 fn run(s: &mut Session, p: &Value) -> CmdResult {
     let tool = ps(p, "tool").ok_or("tool is required")?.to_string();
     let params = p.get("params").cloned().unwrap_or(json!({}));
+    run_tool(s, &tool, &params)
+}
+
+/// The id of a tool named by its id or its display name (history records keep the name).
+pub fn tool_id(name: &str) -> Option<&'static str> {
+    rustgis_analysis::tool(name).or_else(|| rustgis_analysis::tools().find(|t| t.name.eq_ignore_ascii_case(name))).map(|t| t.id)
+}
+
+/// Runs a (built-in) tool and applies its result, as `gp.run` does.
+pub fn run_tool(s: &mut Session, tool: &str, params: &Value) -> CmdResult {
+    let tool = tool_id(tool).unwrap_or(tool).to_string();
+    let params = params.clone();
     let t0 = now_ms();
-    let res = rustgis_analysis::run(&tool, &MapInputs(s.map(), &s.project.tables), &params);
+    let res =
+        rustgis_analysis::run(&tool, &MapInputs(s.map(), &s.project.tables, env_inputs(s.map(), &s.project.gp_env, &params)?), &params);
     let millis = now_ms().saturating_sub(t0);
     let name = rustgis_analysis::tool(&tool).map(|t| t.name).unwrap_or("Tool").to_string();
     apply(s, name, params, res, millis)

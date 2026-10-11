@@ -1,6 +1,6 @@
 # Roadmap
 
-Ribbon feature coverage: **174 of 316 features (55%)** have a command
+Ribbon feature coverage: **196 of 316 features (62%)** have a command
 today ([docs/parity.md](docs/parity.md)). Counting depth (no full 3D scenes or enterprise sharing
 yet), real parity is lower.
 
@@ -26,4 +26,4 @@ yet), real parity is lower.
   CRSs), raster layers (GeoTIFF), XYZ tile basemaps behind an opt-in network setting.
 - M4 Editing: vertex editing, move/rotate, snapping, attribute rules.
 - M5 Analysis: spatial join, intersect/union, near, heat maps, ModelBuilder-style chains.
-- M6 Charts and reports; MCP server for agents (as in WordCraft).
+- M6 Charts and reports; MCP server for agents.
