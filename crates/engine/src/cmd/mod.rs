@@ -12,6 +12,7 @@ pub mod labels;
 pub mod layer;
 pub mod layout;
 pub mod navigate;
+pub mod plugins;
 pub mod project;
 pub mod raster;
 pub mod select;
@@ -45,6 +46,7 @@ pub fn all() -> Vec<CommandSpec> {
     v.extend(workspace::commands());
     v.extend(gp::commands());
     v.extend(share::commands());
+    v.extend(plugins::commands());
     v
 }
 

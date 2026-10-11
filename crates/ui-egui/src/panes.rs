@@ -914,6 +914,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         };
         let row = |app: &mut RustGisApp, ui: &mut Ui, tool: &'static rustgis_engine::analysis::ToolSpec| {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!(tool.name)));
             if resp.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::same(6), t.hover);
             }
@@ -934,7 +935,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // The GeoLibre suite: a thousand tools, so its toolboxes stay closed until opened (or,
         // without the runner, a card says where to get it). Above the built-in tools when
         // browsing, so it isn't lost below them; after them when searching.
-        let external = rustgis_engine::analysis::external_tools();
+        let external = rustgis_engine::cmd::gp::geolibre_tools();
         let geolibre_section = |app: &mut RustGisApp, ui: &mut Ui| {
             if external.is_empty() {
                 if q.is_empty() {
@@ -974,6 +975,27 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 }
             }
         };
+        // Plugin tools, by toolbox ("Plugins › Vector Toolkit"): first when browsing (a user
+        // who just installed a plugin looks for it), with the matches when searching.
+        let plugin_tools: Vec<&'static rustgis_engine::analysis::ToolSpec> =
+            rustgis_engine::analysis::external_tools_of(rustgis_engine::plugins::tools::SOURCE).iter().filter(|x| matches(x)).collect();
+        if !plugin_tools.is_empty() {
+            ui.label(egui::RichText::new(tl!("Plugins")).size(11.0).color(t.text_dim));
+            let mut boxes: Vec<&str> = plugin_tools.iter().map(|t| t.toolbox).collect();
+            boxes.dedup();
+            for b in boxes {
+                let in_box: Vec<_> = plugin_tools.iter().filter(|x| x.toolbox == b).collect();
+                egui::CollapsingHeader::new(format!("{} ({})", b.rsplit(" › ").next().unwrap_or(b), in_box.len()))
+                    .id_salt(("gp-plugin", b))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for tool in in_box {
+                            row(app, ui, tool);
+                        }
+                    });
+            }
+            ui.add_space(6.0);
+        }
         if q.is_empty() {
             geolibre_section(app, ui);
         }
@@ -1146,7 +1168,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 }
             }
             let params = Value::Object(params);
-            if rustgis_engine::analysis::is_external(spec) && app.services.geolibre_run.is_some() {
+            if rustgis_engine::cmd::gp::is_geolibre_tool(spec) && app.services.geolibre_run.is_some() {
                 // The browser's runner is asynchronous: start it, and `poll_geolibre` finishes.
                 match rustgis_engine::cmd::gp::external_start(&mut app.session, spec.id, &params) {
                     Ok(run) => {
