@@ -46,6 +46,7 @@ fn reset(s: &mut Session, p: Project) {
     s.active_layout = None;
     s.tool = Tool::Explore;
     s.clear_history();
+    s.history_from_file = s.project.gp_history.len();
 }
 
 fn new(s: &mut Session, p: &Value) -> CmdResult {
@@ -101,6 +102,7 @@ fn write(s: &mut Session, path: PathBuf) -> CmdResult {
     let path = if path.extension().is_none() { path.with_extension(crate::project::EXTENSION) } else { path };
     s.project.save(&path)?;
     s.dirty = false;
+    s.edit_counts.clear();
     s.notify(format!("Saved {}", path.display()), false);
     s.path = Some(path.clone());
     Ok(json!({"path": path.display().to_string()}))
