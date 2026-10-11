@@ -225,10 +225,18 @@ pub struct Session {
     pub trusted_tasks: std::collections::HashSet<String>,
     /// Models made in this session (lower-cased names); the steps of others may not touch files.
     pub trusted_models: std::collections::HashSet<String>,
+    /// Notebooks made in this session (lower-cased names); the cells of others may not touch files.
+    pub trusted_notebooks: std::collections::HashSet<String>,
+    /// A notebook is running: it may not start another, even through a task or model (no
+    /// unbounded recursion).
+    pub(crate) notebook_running: bool,
     /// How many geoprocessing history records came with the opened project (from its file).
     pub history_from_file: usize,
     /// The report open in the Report pane, if any.
     pub active_report: Option<usize>,
+    /// The presentation and notebook open in their panes, if any.
+    pub active_presentation: Option<usize>,
+    pub active_notebook: Option<usize>,
     /// Drawing tools stay active after a graphic is drawn (Insert › Graphics).
     pub keep_tool: bool,
     /// Copied features (Edit › Clipboard).
@@ -281,8 +289,12 @@ impl Session {
             active_layout: None,
             trusted_tasks: Default::default(),
             trusted_models: Default::default(),
+            trusted_notebooks: Default::default(),
+            notebook_running: false,
             history_from_file: 0,
             active_report: None,
+            active_presentation: None,
+            active_notebook: None,
             edit_counts: std::collections::HashMap::new(),
             topology_errors: Vec::new(),
             measurements: Vec::new(),
@@ -394,6 +406,7 @@ impl Session {
         self.dirty = false;
         self.trusted_tasks.clear();
         self.trusted_models.clear();
+        self.trusted_notebooks.clear();
         self.edit_counts.clear();
         self.topology_errors.clear();
         self.measurements.clear();
@@ -514,6 +527,12 @@ impl Session {
         }
         if self.active_report.is_some_and(|i| i >= self.project.reports.len()) {
             self.active_report = None;
+        }
+        if self.active_presentation.is_some_and(|i| i >= self.project.presentations.len()) {
+            self.active_presentation = None;
+        }
+        if self.active_notebook.is_some_and(|i| i >= self.project.notebooks.len()) {
+            self.active_notebook = None;
         }
         let map = self.project.map();
         if let Some(id) = self.active_layer

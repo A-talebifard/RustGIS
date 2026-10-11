@@ -26,7 +26,7 @@ pub fn commands() -> Vec<C> {
             let n = ps(p, "name").ok_or("name is required")?;
             let before = s.project.models.len();
             s.project.models.retain(|m| !m.name.eq_ignore_ascii_case(n));
-            s.trusted_models.remove(&n.to_lowercase());
+            s.trusted_models.remove(&n.to_ascii_lowercase());
             if s.project.models.len() == before { Err(format!("no model '{n}'")) } else { Ok(Value::Null) }
         })
         .params(r#"{"name": model}"#),
@@ -260,7 +260,7 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     // History that came with an opened project is from a file too.
     let file_history = b(p, "fromHistory").unwrap_or(false) && p.get("steps").is_none() && s.history_from_file > 0;
     if !b(p, "imported").unwrap_or(false) && !file_history {
-        s.trusted_models.insert(name.to_lowercase());
+        s.trusted_models.insert(name.to_ascii_lowercase());
     }
     let n = steps.len();
     s.project.models.push(Model { name: name.clone(), steps });
@@ -277,7 +277,7 @@ fn run_model(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("{} has no steps", model.name));
     }
     // A model that came in a file (an opened project, or an imported tool) may not touch files.
-    if !s.trusted_models.contains(&model.name.to_lowercase())
+    if !s.trusted_models.contains(&model.name.to_ascii_lowercase())
         && let Some((i, st)) = model.steps.iter().enumerate().find(|(_, st)| super::items::touches_files("gp.run", &st.params))
     {
         return Err(format!(
@@ -319,9 +319,10 @@ fn wire(v: &mut Value, outputs: &[String], step: usize, depth: usize) -> Result<
 }
 
 /// Runs a script of commands, one per line (`id {json}`), stopping at the first error. Scripts
-/// are the user's own (typed in the Script pane or passed on the command line; projects don't
-/// carry them), so they may use any command, files included. The whole script is one undo step.
-fn run_script(s: &mut Session, p: &Value) -> CmdResult {
+/// typed in the Script pane or passed on the command line are the user's own, so they may use
+/// any command, files included; notebooks vet cells that came from files before running them.
+/// The whole script is one undo step.
+pub(crate) fn run_script(s: &mut Session, p: &Value) -> CmdResult {
     let script = ps(p, "script").ok_or("script is required")?;
     let mut out = Vec::new();
     for (n, line) in script.lines().enumerate().take(10_000) {
@@ -336,7 +337,7 @@ fn run_script(s: &mut Session, p: &Value) -> CmdResult {
         } else {
             serde_json::from_str(rest.trim()).map_err(|e| format!("line {}: {e}", n + 1))?
         };
-        if id.starts_with("script.") || id.starts_with("ui.") {
+        if id.starts_with("script.") || id.starts_with("ui.") || id == "notebook.run" {
             return Err(format!("line {}: '{id}' can't run in a script", n + 1));
         }
         let spec = s.registry.get(id).ok_or_else(|| format!("line {}: unknown command '{id}'", n + 1))?;

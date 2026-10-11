@@ -60,6 +60,12 @@ pub struct Project {
     /// Reports on layers' records.
     #[serde(default)]
     pub reports: Vec<rustgis_map::report::Report>,
+    /// Presentations: pages of maps, text, images and videos.
+    #[serde(default)]
+    pub presentations: Vec<rustgis_map::presentation::Presentation>,
+    /// Notebooks of text and command cells.
+    #[serde(default)]
+    pub notebooks: Vec<crate::cmd::notebook::Notebook>,
 }
 
 /// A unit of work tracked in the Workflow Manager.
@@ -183,6 +189,8 @@ impl Project {
             jobs: Vec::new(),
             offline_areas: Vec::new(),
             reports: Vec::new(),
+            presentations: Vec::new(),
+            notebooks: Vec::new(),
         }
     }
 
@@ -198,6 +206,22 @@ impl Project {
         for l in &mut self.layouts {
             l.clamp();
         }
+        // Files skip the commands' limits, and notebooks and presentations are found (and
+        // notebooks trusted) by name, so names are made unique.
+        for r in &mut self.reports {
+            r.clamp();
+        }
+        self.reports.truncate(MAX_ITEMS);
+        self.presentations.truncate(MAX_ITEMS);
+        self.notebooks.truncate(MAX_ITEMS);
+        for p in &mut self.presentations {
+            p.clamp();
+        }
+        for nb in &mut self.notebooks {
+            nb.clamp();
+        }
+        unique_names(self.presentations.iter_mut().map(|p| &mut p.name));
+        unique_names(self.notebooks.iter_mut().map(|nb| &mut nb.name));
         for m in &mut self.maps {
             // A projection this version can't use (a hand edit, or a newer file) falls back to
             // Web Mercator rather than being named while another is drawn.
@@ -273,4 +297,28 @@ impl Project {
 fn empty_map() -> &'static Map {
     static M: std::sync::OnceLock<Map> = std::sync::OnceLock::new();
     M.get_or_init(|| Map::new("Map"))
+}
+
+/// Most reports, presentations and notebooks a project file may hold.
+pub const MAX_ITEMS: usize = 1000;
+
+/// Renames names repeated (ignoring case) after their first use: "Tour", "Tour 2", …. Each base
+/// name remembers the last number it gave, so many repeats cost no more than a few each.
+fn unique_names<'a>(names: impl Iterator<Item = &'a mut String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut next: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for name in names {
+        if seen.insert(name.to_ascii_lowercase()) {
+            continue;
+        }
+        let base = name.clone();
+        let k = next.entry(base.to_ascii_lowercase()).or_insert(1);
+        loop {
+            *k += 1;
+            *name = format!("{base} {k}");
+            if seen.insert(name.to_ascii_lowercase()) {
+                break;
+            }
+        }
+    }
 }
