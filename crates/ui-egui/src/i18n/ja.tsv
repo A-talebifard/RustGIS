@@ -1,7 +1,9 @@
 # ja interface catalog: English<TAB>translation
 <None>	<なし>
+A 3D globe seen from space.	宇宙から見た 3D 地球儀。
 A blank map with a basemap	ベースマップ付きの空白マップ
 A fast, open-source desktop GIS written in pure Rust, with the ribbon workflow of desktop GIS: maps and layers, symbology, labeling, selection, editing, geoprocessing and export.	純粋な Rust で書かれた高速なオープンソースのデスクトップ GIS。デスクトップ GIS のリボン ワークフローを備えています：マップとレイヤー、シンボル、ラベリング、選択、編集、ジオプロセシング、エクスポート。
+A projected coordinate system.	投影座標系。
 A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	値、フィールド、またはそれらを + − × ÷ で結合したもの。選択した行に適用され、何も選択されていない場合はすべての行に適用されます。
 About	バージョン情報
 About RustGIS	RustGIS について
@@ -31,6 +33,10 @@ Altitude	高度
 Analysis	解析
 AND	AND
 Apply	適用
+Area of use: longitude {w}° to {e}°, latitude {s}° to {n}°	使用範囲: 経度 {w}° から {e}°、緯度 {s}° から {n}°
+Area of use: the whole world	使用範囲: 全世界
+Area of use: within {r}° of the {lon}° meridian	使用範囲: {lon}° の経線から {r}° 以内
+Area of use: within {r}° of {lon}°, {lat}°	使用範囲: {lon}°, {lat}° から {r}° 以内
 Area {area}   ·   Perimeter {perimeter}	面積 {area}   ·   周長 {perimeter}
 Atlas	アトラス
 Attribute\nTable	属性\nテーブル
@@ -80,9 +86,11 @@ Catalog	カタログ
 Catalog\nPane	カタログ\nウィンドウ
 Cell size	セル サイズ
 Change the map's backdrop.	マップの背景を変更します。
+Change the map's coordinate system	マップの座標系を変更
 Choose a band combination to display the raster layer.	ラスター レイヤーを表示するバンドの組み合わせを選択します。
 Choose a contrast stretch for the raster layer.	ラスター レイヤーのコントラスト ストレッチを選択します。
 Choose a resampling type for the raster layer.	ラスター レイヤーのリサンプリング タイプを選択します。
+Choose how the flat map lays out the Earth.	平面マップで地球をどのように表すかを選択します。
 Choose how the layer is drawn.	レイヤーの描画方法を選択します。
 Choose how the raster is drawn.	ラスターの描画方法を選択します。
 Choose the interface language.	インターフェイスの言語を選択します。
@@ -125,7 +133,9 @@ Compute a field's values.	フィールドの値を計算します。
 Contents	コンテンツ
 Contrast	コントラスト
 Conversion	変換
+Coordinate System	座標系
 Coordinate system	座標系
+Coordinate System…	座標系…
 Copies the (selected) features of a layer to a new layer.	レイヤーの（選択された）フィーチャを新しいレイヤーにコピーします。
 Copy Coordinates	座標のコピー
 Couldn't download the font for {language}; pick the language again to retry.	{language} のフォントをダウンロードできませんでした。もう一度言語を選択して再試行してください。
@@ -192,6 +202,7 @@ e.g.  pop_est / 1000000   or   'Africa'   or   name	例:  pop_est / 1000000   �
 e.g. continent = 'Europe'	例: continent = 'Europe'
 e.g. pop_est > 100000000 AND continent = 'Asia'	例: pop_est > 100000000 AND continent = 'Asia'
 East	東
+Eckert IV (equal-area world)	エケルト第4図法 (正積世界)
 Edit	編集
 Edit Attribute	属性の編集
 Edit attributes in the table.	テーブルで属性を編集します。
@@ -199,10 +210,14 @@ Effects	エフェクト
 Ember	残り火
 Encloses each feature, or all features, in its convex hull.	各フィーチャ、またはすべてのフィーチャを凸包で囲みます。
 Enhancement	強調
+EPSG code	EPSG コード
+Equal Earth	イコールアース図法
 Equal Interval	等間隔
+Equirectangular (Plate Carrée)	正距円筒図法 (Plate Carrée)
 Erase	消去
 Erase Features	フィーチャの消去
 Esc	Esc
+Europe Equal Area (ETRS89 LAEA)	ヨーロッパ正積 (ETRS89 LAEA)
 Expand Legend	凡例を展開
 Expand the ribbon (Ctrl+F1)	リボンを展開 (Ctrl+F1)
 Explore	マップ操作
@@ -279,6 +294,7 @@ Identify	個別属性
 Import\nProject	プロジェクトの\nインポート
 In Beyond	拡大の限界
 In project	プロジェクト内
+In use	使用中
 Information	情報
 Input Features	入力フィーチャ
 Input Polygons	入力ポリゴン
@@ -302,6 +318,7 @@ Label Class	ラベル クラス
 Label Field	ラベル フィールド
 Labeling	ラベリング
 Lagoon	ラグーン
+Lambert Cylindrical Equal Area	ランベルト正積円筒図法
 Language	言語
 Last map render time	前回のマップ描画時間
 Latitude (Y)	緯度（Y）
@@ -341,11 +358,13 @@ Meters	メートル
 Method	手法
 Midnight	真夜中
 Miles	マイル
+Miller Cylindrical	ミラー図法
 Min	最小
 Min %	最小 %
 Minimum Bounding Geometry	最小境界ジオメトリ
 Minimum Maximum	最小-最大
 Mod+	Mod+
+Mollweide (equal-area world)	モルワイデ図法 (正積世界)
 Mouse wheel	マウス ホイール
 Move Down	下へ移動
 Move Up	上へ移動
@@ -375,6 +394,7 @@ No standalone tables	スタンドアロン テーブルはありません
 NoData	NoData
 None	なし
 North	北
+North Polar Stereographic	北極ステレオ図法
 Not saved yet	未保存
 Ocean	海洋
 OID	OID
@@ -391,6 +411,7 @@ Open the layer's attribute table.	レイヤーの属性テーブルを開きま�
 Open the layer's table.	レイヤーのテーブルを開きます。
 Open the selected layer's table.	選択したレイヤーのテーブルを開きます。
 Open the Symbology pane.	シンボル ウィンドウを開きます。
+Open {code} on epsg.io	epsg.io で {code} を開く
 Open, save and create projects	プロジェクトを開く、保存する、作成する
 Open…	開く…
 OR	OR
@@ -411,6 +432,8 @@ Pixel	ピクセル
 Pixel type	ピクセル タイプ
 PNG image	PNG 画像
 Point	ポイント
+Polar, conformal: Antarctica and the Southern Ocean.	極域、正角: 南極大陸と南極海。
+Polar, conformal: the Arctic and the northern lands.	極域、正角: 北極圏と北方の陸地。
 Polygon	ポリゴン
 Polyline	ポリライン
 Populated Places	人口集中地
@@ -418,8 +441,11 @@ Previous	前へ
 Previous Extent	前の範囲
 Primary\nSymbology	プライマリ\nシンボル
 Primary symbology	プライマリ シンボル
+PROJ definition	PROJ 定義
 Project	プロジェクト
 Project Info	プロジェクト情報
+Projection	投影法
+Projections	投影法
 Proportional Symbols	比例シンボル
 Proximity	近接
 Quantile	等量
@@ -434,6 +460,8 @@ Redo	やり直し
 Redo the change you undid.	元に戻した変更をやり直します。
 Redo {action}	{action} をやり直す
 Red–Blue	赤–青
+Regional, equal-area: the contiguous United States.	地域、正積: アメリカ本土 48 州。
+Regional, equal-area: the European standard for statistics.	地域、正積: 統計用のヨーロッパ標準。
 Remove	削除
 Remove Bookmark	ブックマークの削除
 Remove From Current Selection	現在の選択から除外
@@ -453,6 +481,7 @@ Reset brightness, contrast and gamma.	明るさ、コントラスト、ガンマ
 RGB	RGB
 Ribbon feature coverage: {done} of {total} features ({pct}%).	リボン機能のカバー率：{total} 件中 {done} 件の機能（{pct}%）。
 Ribbon parity: {done} of {total} ribbon features have a RustGIS command.	リボンの対応状況：{total} 件のリボン機能のうち {done} 件に RustGIS コマンドがあります。
+Robinson	ロビンソン図法
 Run	実行
 Run Tool	ツールの実行
 RustGIS	RustGIS
@@ -526,6 +555,7 @@ Size	サイズ
 Size, bands, statistics and coordinate system.	サイズ、バンド、統計、座標系。
 Source	ソース
 South	南
+South Polar Stereographic	南極ステレオ図法
 Square	正方形
 Standalone Tables	スタンドアロン テーブル
 Standard Deviation	標準偏差
@@ -559,6 +589,7 @@ Terrain	地形
 Text	テキスト
 Text Symbol	テキスト シンボル
 the map has no layers	マップにレイヤーがありません
+The map is drawn in this coordinate system; layers are projected on the fly.	マップはこの座標系で描画され、レイヤーはその場で投影されます。
 The raster's data couldn't be read.	ラスターのデータを読み込めませんでした。
 The raster's data couldn't be read: {path}	ラスターのデータを読み込めませんでした: {path}
 Thermal	サーマル
@@ -583,6 +614,7 @@ Undo the last change.	最後の変更を元に戻します。
 Undo {action}	{action} を元に戻す
 Unique Values	個別値
 Units	単位
+USA Contiguous Albers Equal Area	米国本土アルベルス正積図法
 Valid expression · {n} matching rows	有効な式 · 一致する行 {n} 件
 Vector and raster data	ベクター データとラスター データ
 Version {version}	バージョン {version}
@@ -591,6 +623,7 @@ View › Windows	表示 › ウィンドウ
 Visibility	表示設定
 Visibility Range	表示縮尺範囲
 Visible	表示
+Web Mercator	Web メルカトル
 Welcome to RustGIS	RustGIS へようこそ
 West	西
 WGS 84 / Globe	WGS 84 / 地球儀
@@ -598,10 +631,21 @@ WGS 84 / Web Mercator	WGS 84 / Web Mercator
 Where	条件
 Where Clause	WHERE 句
 Windows	ウィンドウ
+Winkel Tripel	ヴィンケル図法
 World	世界
 World Atlas	World Atlas
 World Atlas Sample	World Atlas サンプル
 World Countries	世界の国々
+World, compromise: low overall distortion, used for world atlases.	世界、折衷: 全体のひずみが小さく、世界地図帳で使われます。
+World, compromise: neither equal-area nor conformal, balanced for wall maps.	世界、折衷: 正積でも正角でもなく、壁掛け地図向けにバランスを取った図法。
+World, compromise: rounded corners, gentle shapes near the poles.	世界、折衷: 角が丸く、極付近の形がなだらか。
+World, conformal: the usual web map; areas grow towards the poles.	世界、正角: 一般的なウェブ地図。面積は極に向かって大きくなります。
+World, cylindrical: a compromise between Mercator and equal steps.	世界、円筒: メルカトル図法と等間隔の折衷。
+World, cylindrical: equal steps of longitude and latitude.	世界、円筒: 経度と緯度が等間隔。
+World, equal-area, cylindrical: true sizes, flattened near the poles.	世界、正積、円筒: 面積が正しく、極付近で平たくなります。
+World, equal-area: true sizes with a Robinson-like look.	世界、正積: 面積が正しく、ロビンソン図法に似た見た目。
+World, equal-area: true sizes with rounded poles.	世界、正積: 面積が正しく、極が丸い。
+World, equal-area: true sizes, shapes bend towards the edges.	世界、正積: 面積が正しく、縁に向かって形が曲がります。
 Yes	はい
 Z factor	Z 係数
 Zoom about the pointer	ポインターを中心にズーム

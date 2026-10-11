@@ -1,7 +1,9 @@
 # az interface catalog: English<TAB>translation
 <None>	<Heç biri>
+A 3D globe seen from space.	Kosmosdan görünən 3D qlobus.
 A blank map with a basemap	Əsas xəritəli boş xəritə
 A fast, open-source desktop GIS written in pure Rust, with the ribbon workflow of desktop GIS: maps and layers, symbology, labeling, selection, editing, geoprocessing and export.	Təmiz Rust dilində yazılmış sürətli, açıq mənbəli masaüstü CİS; masaüstü CİS-in lent iş axını ilə: xəritələr və laylar, simvolika, etiketləmə, seçim, redaktə, geoemal və ixrac.
+A projected coordinate system.	Proyeksiyalı koordinat sistemi.
 A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	Qiymət, sahə və ya + − × ÷ ilə birləşdirilmiş ikisi. Seçilmiş sətirlərə, heç nə seçilməyibsə bütün sətirlərə tətbiq olunur.
 About	Haqqında
 About RustGIS	RustGIS haqqında
@@ -31,6 +33,10 @@ Altitude	Hündürlük
 Analysis	Analiz
 AND	AND
 Apply	Tətbiq et
+Area of use: longitude {w}° to {e}°, latitude {s}° to {n}°	İstifadə sahəsi: uzunluq {w}°-dən {e}°-yə, enlik {s}°-dən {n}°-yə
+Area of use: the whole world	İstifadə sahəsi: bütün dünya
+Area of use: within {r}° of the {lon}° meridian	İstifadə sahəsi: {lon}° meridianından {r}° daxilində
+Area of use: within {r}° of {lon}°, {lat}°	İstifadə sahəsi: {lon}°, {lat}° nöqtəsindən {r}° daxilində
 Area {area}   ·   Perimeter {perimeter}	Sahə {area}   ·   Perimetr {perimeter}
 Atlas	Atlas
 Attribute\nTable	Atribut\ncədvəli
@@ -80,9 +86,11 @@ Catalog	Kataloq
 Catalog\nPane	Kataloq\npaneli
 Cell size	Xana ölçüsü
 Change the map's backdrop.	Xəritənin fonunu dəyişin.
+Change the map's coordinate system	Xəritənin koordinat sistemini dəyiş
 Choose a band combination to display the raster layer.	Rastr layını göstərmək üçün kanal kombinasiyası seçin.
 Choose a contrast stretch for the raster layer.	Rastr layı üçün kontrast genişləndirməsi seçin.
 Choose a resampling type for the raster layer.	Rastr layı üçün yenidən nümunələmə tipini seçin.
+Choose how the flat map lays out the Earth.	Düz xəritənin Yeri necə göstərdiyini seçin.
 Choose how the layer is drawn.	Layın necə çəkiləcəyini seçin.
 Choose how the raster is drawn.	Rastrın necə çəkiləcəyini seçin.
 Choose the interface language.	İnterfeys dilini seçin.
@@ -125,7 +133,9 @@ Compute a field's values.	Sahənin qiymətlərini hesablayın.
 Contents	Məzmun
 Contrast	Kontrast
 Conversion	Çevirmə
+Coordinate System	Koordinat sistemi
 Coordinate system	Koordinat sistemi
+Coordinate System…	Koordinat sistemi…
 Copies the (selected) features of a layer to a new layer.	Layın (seçilmiş) obyektlərini yeni laya kopyalayır.
 Copy Coordinates	Koordinatları kopyala
 Couldn't download the font for {language}; pick the language again to retry.	{language} üçün şrift endirilə bilmədi; yenidən cəhd etmək üçün dili yenidən seçin.
@@ -192,6 +202,7 @@ e.g.  pop_est / 1000000   or   'Africa'   or   name	məs.  pop_est / 1000000   v
 e.g. continent = 'Europe'	məs. continent = 'Europe'
 e.g. pop_est > 100000000 AND continent = 'Asia'	məs. pop_est > 100000000 AND continent = 'Asia'
 East	Şərq
+Eckert IV (equal-area world)	Eckert IV (bərabərsahəli dünya)
 Edit	Redaktə
 Edit Attribute	Atributu redaktə et
 Edit attributes in the table.	Cədvəldə atributları redaktə edin.
@@ -199,10 +210,14 @@ Effects	Effektlər
 Ember	Köz
 Encloses each feature, or all features, in its convex hull.	Hər obyekti və ya bütün obyektləri qabarıq örtüyə alır.
 Enhancement	Gücləndirmə
+EPSG code	EPSG kodu
+Equal Earth	Equal Earth
 Equal Interval	Bərabər interval
+Equirectangular (Plate Carrée)	Bərabər məsafəli silindrik (Plate Carrée)
 Erase	Pozma
 Erase Features	Obyektləri poz
 Esc	Esc
+Europe Equal Area (ETRS89 LAEA)	Avropa bərabər sahəli (ETRS89 LAEA)
 Expand Legend	Legendanı genişləndir
 Expand the ribbon (Ctrl+F1)	Lenti aç (Ctrl+F1)
 Explore	Kəşf et
@@ -279,6 +294,7 @@ Identify	Müəyyən et
 Import\nProject	Layihəni\nidxal et
 In Beyond	Yaxınlaşma həddi
 In project	Layihədə
+In use	İstifadədədir
 Information	Məlumat
 Input Features	Giriş obyektləri
 Input Polygons	Giriş poliqonları
@@ -302,6 +318,7 @@ Label Class	Etiket sinfi
 Label Field	Etiket sahəsi
 Labeling	Etiketləmə
 Lagoon	Laquna
+Lambert Cylindrical Equal Area	Lambert bərabər sahəli silindrik
 Language	Dil
 Last map render time	Xəritənin son göstərilmə vaxtı
 Latitude (Y)	En dairəsi (Y)
@@ -341,11 +358,13 @@ Meters	Metr
 Method	Üsul
 Midnight	Gecəyarısı
 Miles	Mil
+Miller Cylindrical	Miller silindrik
 Min	Min
 Min %	Min %
 Minimum Bounding Geometry	Minimal sərhəd həndəsəsi
 Minimum Maximum	Minimum maksimum
 Mod+	Mod+
+Mollweide (equal-area world)	Mollveyde (bərabər sahəli dünya)
 Mouse wheel	Siçan çarxı
 Move Down	Aşağı köçür
 Move Up	Yuxarı köçür
@@ -375,6 +394,7 @@ No standalone tables	Müstəqil cədvəl yoxdur
 NoData	NoData
 None	Heç biri
 North	Şimal
+North Polar Stereographic	Şimal qütb stereoqrafik
 Not saved yet	Hələ saxlanmayıb
 Ocean	Okean
 OID	OID
@@ -391,6 +411,7 @@ Open the layer's attribute table.	Layın atribut cədvəlini açın.
 Open the layer's table.	Layın cədvəlini açın.
 Open the selected layer's table.	Seçilmiş layın cədvəlini açın.
 Open the Symbology pane.	Simvolika panelini açın.
+Open {code} on epsg.io	{code} kodunu epsg.io-da aç
 Open, save and create projects	Layihələri açın, saxlayın və yaradın
 Open…	Aç…
 OR	OR
@@ -411,6 +432,8 @@ Pixel	Piksel
 Pixel type	Piksel tipi
 PNG image	PNG təsviri
 Point	Nöqtə
+Polar, conformal: Antarctica and the Southern Ocean.	Qütb, konform: Antarktida və Cənub okeanı.
+Polar, conformal: the Arctic and the northern lands.	Qütb, konform: Arktika və şimal torpaqları.
 Polygon	Poliqon
 Polyline	Polixətt
 Populated Places	Yaşayış məntəqələri
@@ -418,8 +441,11 @@ Previous	Əvvəlki
 Previous Extent	Əvvəlki hüdud
 Primary\nSymbology	Əsas\nsimvolika
 Primary symbology	Əsas simvolika
+PROJ definition	PROJ tərifi
 Project	Layihə
 Project Info	Layihə məlumatı
+Projection	Proyeksiya
+Projections	Proyeksiyalar
 Proportional Symbols	Mütənasib simvollar
 Proximity	Yaxınlıq
 Quantile	Kvantil
@@ -434,6 +460,8 @@ Redo	Təkrarla
 Redo the change you undid.	Geri aldığınız dəyişikliyi təkrarlayın.
 Redo {action}	{action} təkrarla
 Red–Blue	Qırmızı–Mavi
+Regional, equal-area: the contiguous United States.	Regional, bərabərsahəli: bitişik Amerika Birləşmiş Ştatları.
+Regional, equal-area: the European standard for statistics.	Regional, bərabərsahəli: statistika üçün Avropa standartı.
 Remove	Sil
 Remove Bookmark	Əlfəcini sil
 Remove From Current Selection	Cari seçimdən çıxar
@@ -453,6 +481,7 @@ Reset brightness, contrast and gamma.	Parlaqlığı, kontrastı və qammanı sı
 RGB	RGB
 Ribbon feature coverage: {done} of {total} features ({pct}%).	Lent funksiyalarının əhatəsi: {total} funksiyadan {done} ({pct}%).
 Ribbon parity: {done} of {total} ribbon features have a RustGIS command.	Lent uyğunluğu: {total} lent funksiyasından {done} RustGIS əmrinə malikdir.
+Robinson	Robinson
 Run	İşə sal
 Run Tool	Aləti işə sal
 RustGIS	RustGIS
@@ -526,6 +555,7 @@ Size	Ölçü
 Size, bands, statistics and coordinate system.	Ölçü, kanallar, statistika və koordinat sistemi.
 Source	Mənbə
 South	Cənub
+South Polar Stereographic	Cənub qütb stereoqrafik
 Square	Kvadrat
 Standalone Tables	Müstəqil cədvəllər
 Standard Deviation	Standart sapma
@@ -559,6 +589,7 @@ Terrain	Relyef
 Text	Mətn
 Text Symbol	Mətn simvolu
 the map has no layers	xəritədə lay yoxdur
+The map is drawn in this coordinate system; layers are projected on the fly.	Xəritə bu koordinat sistemində çəkilir; laylar dərhal proyeksiya olunur.
 The raster's data couldn't be read.	Rastrın məlumatı oxuna bilmədi.
 The raster's data couldn't be read: {path}	Rastrın məlumatı oxuna bilmədi: {path}
 Thermal	Termal
@@ -583,6 +614,7 @@ Undo the last change.	Son dəyişikliyi geri alın.
 Undo {action}	{action} geri al
 Unique Values	Unikal qiymətlər
 Units	Vahidlər
+USA Contiguous Albers Equal Area	ABŞ bitişik ştatlar Albers bərabər sahəli
 Valid expression · {n} matching rows	İfadə düzgündür · {n} uyğun sətir
 Vector and raster data	Vektor və rastr məlumatı
 Version {version}	Versiya {version}
@@ -591,6 +623,7 @@ View › Windows	Görünüş › Pəncərələr
 Visibility	Görünmə
 Visibility Range	Görünmə diapazonu
 Visible	Görünən
+Web Mercator	Web Mercator
 Welcome to RustGIS	RustGIS-ə xoş gəlmisiniz
 West	Qərb
 WGS 84 / Globe	WGS 84 / Qlobus
@@ -598,10 +631,21 @@ WGS 84 / Web Mercator	WGS 84 / Web Mercator
 Where	Where
 Where Clause	Where şərti
 Windows	Pəncərələr
+Winkel Tripel	Winkel Tripel
 World	Dünya
 World Atlas	Dünya Atlası
 World Atlas Sample	Dünya Atlası nümunəsi
 World Countries	Dünya ölkələri
+World, compromise: low overall distortion, used for world atlases.	Dünya, kompromis: ümumi təhrif azdır, dünya atlaslarında istifadə olunur.
+World, compromise: neither equal-area nor conformal, balanced for wall maps.	Dünya, kompromis: nə bərabərsahəli, nə konform; divar xəritələri üçün balanslı.
+World, compromise: rounded corners, gentle shapes near the poles.	Dünya, kompromis: yuvarlaq künclər, qütblər yaxınlığında yumşaq formalar.
+World, conformal: the usual web map; areas grow towards the poles.	Dünya, konform: adi veb xəritə; sahələr qütblərə doğru böyüyür.
+World, cylindrical: a compromise between Mercator and equal steps.	Dünya, silindrik: Merkator ilə bərabər addımlar arasında kompromis.
+World, cylindrical: equal steps of longitude and latitude.	Dünya, silindrik: uzunluq və enlikdə bərabər addımlar.
+World, equal-area, cylindrical: true sizes, flattened near the poles.	Dünya, bərabərsahəli, silindrik: həqiqi ölçülər, qütblər yaxınlığında yastılaşır.
+World, equal-area: true sizes with a Robinson-like look.	Dünya, bərabərsahəli: həqiqi ölçülər, Robinsona bənzər görünüş.
+World, equal-area: true sizes with rounded poles.	Dünya, bərabərsahəli: həqiqi ölçülər, yuvarlaq qütblər.
+World, equal-area: true sizes, shapes bend towards the edges.	Dünya, bərabərsahəli: həqiqi ölçülər, formalar kənarlara doğru əyilir.
 Yes	Bəli
 Z factor	Z əmsalı
 Zoom about the pointer	Göstərici ətrafında miqyası dəyiş

@@ -1,7 +1,9 @@
 # de interface catalog: English<TAB>translation
 <None>	<Keine>
+A 3D globe seen from space.	Ein 3D-Globus, aus dem All gesehen.
 A blank map with a basemap	Eine leere Karte mit Grundkarte
 A fast, open-source desktop GIS written in pure Rust, with the ribbon workflow of desktop GIS: maps and layers, symbology, labeling, selection, editing, geoprocessing and export.	Ein schnelles Open-Source-Desktop-GIS in reinem Rust, mit dem Menüband-Workflow eines Desktop-GIS: Karten und Layer, Symbologie, Beschriftung, Auswahl, Bearbeitung, Geoverarbeitung und Export.
+A projected coordinate system.	Ein projiziertes Koordinatensystem.
 A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	Ein Wert, ein Feld oder zwei davon, verknüpft mit + − × ÷. Gilt für die ausgewählten Zeilen oder alle Zeilen, wenn keine ausgewählt ist.
 About	Über
 About RustGIS	Über RustGIS
@@ -31,6 +33,10 @@ Altitude	Höhe
 Analysis	Analyse
 AND	AND
 Apply	Anwenden
+Area of use: longitude {w}° to {e}°, latitude {s}° to {n}°	Anwendungsbereich: Länge {w}° bis {e}°, Breite {s}° bis {n}°
+Area of use: the whole world	Anwendungsbereich: die ganze Welt
+Area of use: within {r}° of the {lon}° meridian	Anwendungsbereich: innerhalb von {r}° um den Meridian {lon}°
+Area of use: within {r}° of {lon}°, {lat}°	Anwendungsbereich: innerhalb von {r}° um {lon}°, {lat}°
 Area {area}   ·   Perimeter {perimeter}	Fläche {area}   ·   Umfang {perimeter}
 Atlas	Atlas
 Attribute\nTable	Attribut-\ntabelle
@@ -80,9 +86,11 @@ Catalog	Katalog
 Catalog\nPane	Katalog-\nbereich
 Cell size	Zellengröße
 Change the map's backdrop.	Den Kartenhintergrund ändern.
+Change the map's coordinate system	Koordinatensystem der Karte ändern
 Choose a band combination to display the raster layer.	Eine Kanalkombination zur Anzeige des Raster-Layers wählen.
 Choose a contrast stretch for the raster layer.	Eine Kontraststreckung für den Raster-Layer wählen.
 Choose a resampling type for the raster layer.	Ein Resampling-Verfahren für den Raster-Layer wählen.
+Choose how the flat map lays out the Earth.	Wählen, wie die flache Karte die Erde abbildet.
 Choose how the layer is drawn.	Festlegen, wie der Layer gezeichnet wird.
 Choose how the raster is drawn.	Festlegen, wie das Raster dargestellt wird.
 Choose the interface language.	Die Sprache der Oberfläche wählen.
@@ -125,7 +133,9 @@ Compute a field's values.	Die Werte eines Feldes berechnen.
 Contents	Inhalt
 Contrast	Kontrast
 Conversion	Konvertierung
+Coordinate System	Koordinatensystem
 Coordinate system	Koordinatensystem
+Coordinate System…	Koordinatensystem…
 Copies the (selected) features of a layer to a new layer.	Kopiert die (ausgewählten) Objekte eines Layers in einen neuen Layer.
 Copy Coordinates	Koordinaten kopieren
 Couldn't download the font for {language}; pick the language again to retry.	Die Schriftart für {language} konnte nicht heruntergeladen werden; wählen Sie die Sprache erneut, um es noch einmal zu versuchen.
@@ -192,6 +202,7 @@ e.g.  pop_est / 1000000   or   'Africa'   or   name	z. B.  pop_est / 1000000   o
 e.g. continent = 'Europe'	z. B. continent = 'Europe'
 e.g. pop_est > 100000000 AND continent = 'Asia'	z. B. pop_est > 100000000 AND continent = 'Asia'
 East	Ost
+Eckert IV (equal-area world)	Eckert IV (flächentreue Weltkarte)
 Edit	Bearbeiten
 Edit Attribute	Attribut bearbeiten
 Edit attributes in the table.	Attribute in der Tabelle bearbeiten.
@@ -199,10 +210,14 @@ Effects	Effekte
 Ember	Glut
 Encloses each feature, or all features, in its convex hull.	Umschließt jedes Objekt oder alle Objekte mit ihrer konvexen Hülle.
 Enhancement	Verbesserung
+EPSG code	EPSG-Code
+Equal Earth	Equal Earth
 Equal Interval	Gleiches Intervall
+Equirectangular (Plate Carrée)	Plattkarte (abstandstreu zylindrisch)
 Erase	Radieren
 Erase Features	Objekte radieren
 Esc	Esc
+Europe Equal Area (ETRS89 LAEA)	Europa flächentreu (ETRS89 LAEA)
 Expand Legend	Legende erweitern
 Expand the ribbon (Ctrl+F1)	Menüband erweitern (Strg+F1)
 Explore	Erkunden
@@ -279,6 +294,7 @@ Identify	Identifizieren
 Import\nProject	Projekt\nimportieren
 In Beyond	Ausblenden unter
 In project	Im Projekt
+In use	In Verwendung
 Information	Informationen
 Input Features	Eingabeobjekte
 Input Polygons	Eingabepolygone
@@ -302,6 +318,7 @@ Label Class	Beschriftungsklasse
 Label Field	Beschriftungsfeld
 Labeling	Beschriftung
 Lagoon	Lagune
+Lambert Cylindrical Equal Area	Lambert flächentreue Zylinderprojektion
 Language	Sprache
 Last map render time	Letzte Kartenrenderzeit
 Latitude (Y)	Breite (Y)
@@ -341,11 +358,13 @@ Meters	Meter
 Method	Methode
 Midnight	Mitternacht
 Miles	Meilen
+Miller Cylindrical	Miller-Zylinderprojektion
 Min	Min
 Min %	Min %
 Minimum Bounding Geometry	Minimale umgebende Geometrie
 Minimum Maximum	Minimum Maximum
 Mod+	Mod+
+Mollweide (equal-area world)	Mollweide (flächentreue Weltkarte)
 Mouse wheel	Mausrad
 Move Down	Nach unten
 Move Up	Nach oben
@@ -375,6 +394,7 @@ No standalone tables	Keine eigenständigen Tabellen
 NoData	NoData
 None	Keine
 North	Nord
+North Polar Stereographic	Polare stereografische Projektion (Nord)
 Not saved yet	Noch nicht gespeichert
 Ocean	Ozean
 OID	OID
@@ -391,6 +411,7 @@ Open the layer's attribute table.	Die Attributtabelle des Layers öffnen.
 Open the layer's table.	Die Tabelle des Layers öffnen.
 Open the selected layer's table.	Die Tabelle des ausgewählten Layers öffnen.
 Open the Symbology pane.	Den Symbologie-Bereich öffnen.
+Open {code} on epsg.io	{code} auf epsg.io öffnen
 Open, save and create projects	Projekte öffnen, speichern und erstellen
 Open…	Öffnen…
 OR	OR
@@ -411,6 +432,8 @@ Pixel	Pixel
 Pixel type	Pixeltyp
 PNG image	PNG-Bild
 Point	Punkt
+Polar, conformal: Antarctica and the Southern Ocean.	Polar, winkeltreu: die Antarktis und das Südpolarmeer.
+Polar, conformal: the Arctic and the northern lands.	Polar, winkeltreu: die Arktis und die nördlichen Länder.
 Polygon	Polygon
 Polyline	Polylinie
 Populated Places	Besiedelte Orte
@@ -418,8 +441,11 @@ Previous	Zurück
 Previous Extent	Vorherige Ausdehnung
 Primary\nSymbology	Primäre\nSymbologie
 Primary symbology	Primäre Symbologie
+PROJ definition	PROJ-Definition
 Project	Projekt
 Project Info	Projektinfo
+Projection	Projektion
+Projections	Projektionen
 Proportional Symbols	Proportionale Symbole
 Proximity	Nachbarschaft
 Quantile	Quantil
@@ -434,6 +460,8 @@ Redo	Wiederholen
 Redo the change you undid.	Die rückgängig gemachte Änderung wiederholen.
 Redo {action}	{action} wiederholen
 Red–Blue	Rot–Blau
+Regional, equal-area: the contiguous United States.	Regional, flächentreu: die zusammenhängenden Vereinigten Staaten.
+Regional, equal-area: the European standard for statistics.	Regional, flächentreu: der europäische Standard für Statistiken.
 Remove	Entfernen
 Remove Bookmark	Lesezeichen entfernen
 Remove From Current Selection	Aus aktueller Auswahl entfernen
@@ -453,6 +481,7 @@ Reset brightness, contrast and gamma.	Helligkeit, Kontrast und Gamma zurücksetz
 RGB	RGB
 Ribbon feature coverage: {done} of {total} features ({pct}%).	Abdeckung der Menüband-Funktionen: {done} von {total} Funktionen ({pct} %).
 Ribbon parity: {done} of {total} ribbon features have a RustGIS command.	Menüband-Parität: {done} von {total} Menüband-Funktionen haben einen RustGIS-Befehl.
+Robinson	Robinson
 Run	Ausführen
 Run Tool	Werkzeug ausführen
 RustGIS	RustGIS
@@ -526,6 +555,7 @@ Size	Größe
 Size, bands, statistics and coordinate system.	Größe, Kanäle, Statistik und Koordinatensystem.
 Source	Quelle
 South	Süd
+South Polar Stereographic	Polare stereografische Projektion (Süd)
 Square	Quadrat
 Standalone Tables	Eigenständige Tabellen
 Standard Deviation	Standardabweichung
@@ -559,6 +589,7 @@ Terrain	Gelände
 Text	Text
 Text Symbol	Textsymbol
 the map has no layers	die Karte hat keine Layer
+The map is drawn in this coordinate system; layers are projected on the fly.	Die Karte wird in diesem Koordinatensystem gezeichnet; Layer werden spontan projiziert.
 The raster's data couldn't be read.	Die Daten des Rasters konnten nicht gelesen werden.
 The raster's data couldn't be read: {path}	Die Daten des Rasters konnten nicht gelesen werden: {path}
 Thermal	Thermisch
@@ -583,6 +614,7 @@ Undo the last change.	Die letzte Änderung rückgängig machen.
 Undo {action}	{action} rückgängig machen
 Unique Values	Eindeutige Werte
 Units	Einheiten
+USA Contiguous Albers Equal Area	USA flächentreue Albers-Projektion
 Valid expression · {n} matching rows	Gültiger Ausdruck · {n} passende Zeilen
 Vector and raster data	Vektor- und Rasterdaten
 Version {version}	Version {version}
@@ -591,6 +623,7 @@ View › Windows	Ansicht › Fenster
 Visibility	Sichtbarkeit
 Visibility Range	Sichtbarkeitsbereich
 Visible	Sichtbar
+Web Mercator	Web Mercator
 Welcome to RustGIS	Willkommen bei RustGIS
 West	West
 WGS 84 / Globe	WGS 84 / Globus
@@ -598,10 +631,21 @@ WGS 84 / Web Mercator	WGS 84 / Web Mercator
 Where	Wo
 Where Clause	WHERE-Klausel
 Windows	Fenster
+Winkel Tripel	Winkel-Tripel
 World	Welt
 World Atlas	Weltatlas
 World Atlas Sample	Weltatlas-Beispiel
 World Countries	Länder der Welt
+World, compromise: low overall distortion, used for world atlases.	Welt, vermittelnd: geringe Gesamtverzerrung, für Weltatlanten verwendet.
+World, compromise: neither equal-area nor conformal, balanced for wall maps.	Welt, vermittelnd: weder flächen- noch winkeltreu, ausgewogen für Wandkarten.
+World, compromise: rounded corners, gentle shapes near the poles.	Welt, vermittelnd: abgerundete Ecken, sanfte Formen nahe den Polen.
+World, conformal: the usual web map; areas grow towards the poles.	Welt, winkeltreu: die übliche Webkarte; Flächen wachsen zu den Polen hin.
+World, cylindrical: a compromise between Mercator and equal steps.	Welt, zylindrisch: ein Kompromiss zwischen Mercator und gleichen Abständen.
+World, cylindrical: equal steps of longitude and latitude.	Welt, zylindrisch: gleiche Schritte in Länge und Breite.
+World, equal-area, cylindrical: true sizes, flattened near the poles.	Welt, flächentreu, zylindrisch: wahre Größen, an den Polen gestaucht.
+World, equal-area: true sizes with a Robinson-like look.	Welt, flächentreu: wahre Größen mit einem Robinson-ähnlichen Aussehen.
+World, equal-area: true sizes with rounded poles.	Welt, flächentreu: wahre Größen mit abgerundeten Polen.
+World, equal-area: true sizes, shapes bend towards the edges.	Welt, flächentreu: wahre Größen, Formen biegen sich zu den Rändern hin.
 Yes	Ja
 Z factor	Z-Faktor
 Zoom about the pointer	Um den Mauszeiger zoomen

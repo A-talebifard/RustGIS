@@ -1,7 +1,9 @@
 # ko interface catalog: English<TAB>translation
 <None>	<없음>
+A 3D globe seen from space.	우주에서 본 3D 지구본.
 A blank map with a basemap	배경지도가 있는 빈 지도
 A fast, open-source desktop GIS written in pure Rust, with the ribbon workflow of desktop GIS: maps and layers, symbology, labeling, selection, editing, geoprocessing and export.	순수 Rust로 작성된 빠른 오픈 소스 데스크톱 GIS로, 데스크톱 GIS의 리본 워크플로를 제공합니다: 지도와 레이어, 심볼, 라벨, 선택, 편집, 지오프로세싱 및 내보내기.
+A projected coordinate system.	투영 좌표계.
 A value, a field, or two of them joined by + − × ÷. Applies to the selected rows, or every row when none is selected.	값, 필드 또는 이 둘을 + − × ÷ 로 결합한 식입니다. 선택한 행에 적용되며, 선택한 행이 없으면 모든 행에 적용됩니다.
 About	정보
 About RustGIS	RustGIS 정보
@@ -31,6 +33,10 @@ Altitude	고도
 Analysis	분석
 AND	AND
 Apply	적용
+Area of use: longitude {w}° to {e}°, latitude {s}° to {n}°	사용 범위: 경도 {w}°~{e}°, 위도 {s}°~{n}°
+Area of use: the whole world	사용 범위: 전 세계
+Area of use: within {r}° of the {lon}° meridian	사용 범위: {lon}° 경선에서 {r}° 이내
+Area of use: within {r}° of {lon}°, {lat}°	사용 범위: {lon}°, {lat}°에서 {r}° 이내
 Area {area}   ·   Perimeter {perimeter}	면적 {area}   ·   둘레 {perimeter}
 Atlas	아틀라스
 Attribute\nTable	속성\n테이블
@@ -80,9 +86,11 @@ Catalog	카탈로그
 Catalog\nPane	카탈로그\n창
 Cell size	셀 크기
 Change the map's backdrop.	지도의 배경을 변경합니다.
+Change the map's coordinate system	지도 좌표계 변경
 Choose a band combination to display the raster layer.	래스터 레이어를 표시할 밴드 조합을 선택합니다.
 Choose a contrast stretch for the raster layer.	래스터 레이어의 대비 스트레치를 선택합니다.
 Choose a resampling type for the raster layer.	래스터 레이어의 리샘플링 유형을 선택합니다.
+Choose how the flat map lays out the Earth.	평면 지도가 지구를 표현하는 방식을 선택합니다.
 Choose how the layer is drawn.	레이어를 그리는 방식을 선택합니다.
 Choose how the raster is drawn.	래스터를 그리는 방법을 선택합니다.
 Choose the interface language.	인터페이스 언어를 선택합니다.
@@ -125,7 +133,9 @@ Compute a field's values.	필드 값을 계산합니다.
 Contents	목차
 Contrast	대비
 Conversion	변환
+Coordinate System	좌표계
 Coordinate system	좌표계
+Coordinate System…	좌표계…
 Copies the (selected) features of a layer to a new layer.	레이어의 (선택한) 피처를 새 레이어로 복사합니다.
 Copy Coordinates	좌표 복사
 Couldn't download the font for {language}; pick the language again to retry.	{language} 글꼴을 다운로드할 수 없습니다. 다시 시도하려면 언어를 다시 선택하세요.
@@ -192,6 +202,7 @@ e.g.  pop_est / 1000000   or   'Africa'   or   name	예:  pop_est / 1000000   �
 e.g. continent = 'Europe'	예: continent = 'Europe'
 e.g. pop_est > 100000000 AND continent = 'Asia'	예: pop_est > 100000000 AND continent = 'Asia'
 East	동
+Eckert IV (equal-area world)	에케르트 IV (정적 세계)
 Edit	편집
 Edit Attribute	속성 편집
 Edit attributes in the table.	테이블에서 속성을 편집합니다.
@@ -199,10 +210,14 @@ Effects	효과
 Ember	엠버
 Encloses each feature, or all features, in its convex hull.	각 피처 또는 모든 피처를 볼록 껍질로 둘러쌉니다.
 Enhancement	향상
+EPSG code	EPSG 코드
+Equal Earth	이퀄 어스 도법
 Equal Interval	등간격
+Equirectangular (Plate Carrée)	정거원통도법 (Plate Carrée)
 Erase	지우기(Erase)
 Erase Features	피처 지우기
 Esc	Esc
+Europe Equal Area (ETRS89 LAEA)	유럽 정적도법 (ETRS89 LAEA)
 Expand Legend	범례 펼치기
 Expand the ribbon (Ctrl+F1)	리본 확장 (Ctrl+F1)
 Explore	탐색
@@ -279,6 +294,7 @@ Identify	식별
 Import\nProject	프로젝트\n가져오기
 In Beyond	다음보다 확대 시
 In project	프로젝트 내
+In use	사용 중
 Information	정보
 Input Features	입력 피처
 Input Polygons	입력 폴리곤
@@ -302,6 +318,7 @@ Label Class	라벨 클래스
 Label Field	라벨 필드
 Labeling	라벨링
 Lagoon	라군
+Lambert Cylindrical Equal Area	램버트 원통 정적도법
 Language	언어
 Last map render time	마지막 지도 렌더링 시간
 Latitude (Y)	위도(Y)
@@ -341,11 +358,13 @@ Meters	미터
 Method	방법
 Midnight	자정
 Miles	마일
+Miller Cylindrical	밀러 원통도법
 Min	최소
 Min %	최소 %
 Minimum Bounding Geometry	최소 경계 지오메트리
 Minimum Maximum	최소-최대
 Mod+	Mod+
+Mollweide (equal-area world)	몰바이데 도법 (정적 세계)
 Mouse wheel	마우스 휠
 Move Down	아래로 이동
 Move Up	위로 이동
@@ -375,6 +394,7 @@ No standalone tables	독립 테이블 없음
 NoData	NoData
 None	없음
 North	북
+North Polar Stereographic	북극 평사도법
 Not saved yet	아직 저장되지 않음
 Ocean	바다
 OID	OID
@@ -391,6 +411,7 @@ Open the layer's attribute table.	레이어의 속성 테이블을 엽니다.
 Open the layer's table.	레이어의 테이블을 엽니다.
 Open the selected layer's table.	선택한 레이어의 테이블을 엽니다.
 Open the Symbology pane.	심볼 창을 엽니다.
+Open {code} on epsg.io	epsg.io에서 {code} 열기
 Open, save and create projects	프로젝트 열기, 저장 및 만들기
 Open…	열기…
 OR	OR
@@ -411,6 +432,8 @@ Pixel	픽셀
 Pixel type	픽셀 유형
 PNG image	PNG 이미지
 Point	포인트
+Polar, conformal: Antarctica and the Southern Ocean.	극지, 정각: 남극 대륙과 남극해.
+Polar, conformal: the Arctic and the northern lands.	극지, 정각: 북극과 북쪽 육지.
 Polygon	폴리곤
 Polyline	폴리라인
 Populated Places	인구 밀집 지역
@@ -418,8 +441,11 @@ Previous	이전
 Previous Extent	이전 범위
 Primary\nSymbology	기본\n심볼
 Primary symbology	기본 심볼
+PROJ definition	PROJ 정의
 Project	프로젝트
 Project Info	프로젝트 정보
+Projection	투영
+Projections	투영
 Proportional Symbols	비례 심볼
 Proximity	근접
 Quantile	분위수
@@ -434,6 +460,8 @@ Redo	다시 실행
 Redo the change you undid.	실행 취소한 변경을 다시 실행합니다.
 Redo {action}	{action} 다시 실행
 Red–Blue	빨강–파랑
+Regional, equal-area: the contiguous United States.	지역, 정적: 미국 본토.
+Regional, equal-area: the European standard for statistics.	지역, 정적: 통계용 유럽 표준.
 Remove	제거
 Remove Bookmark	북마크 제거
 Remove From Current Selection	현재 선택에서 제거
@@ -453,6 +481,7 @@ Reset brightness, contrast and gamma.	밝기, 대비 및 감마를 재설정합�
 RGB	RGB
 Ribbon feature coverage: {done} of {total} features ({pct}%).	리본 기능 지원 범위: {total}개 중 {done}개 기능({pct}%).
 Ribbon parity: {done} of {total} ribbon features have a RustGIS command.	리본 대응: 리본 기능 {total}개 중 {done}개에 RustGIS 명령이 있습니다.
+Robinson	로빈슨 도법
 Run	실행
 Run Tool	도구 실행
 RustGIS	RustGIS
@@ -526,6 +555,7 @@ Size	크기
 Size, bands, statistics and coordinate system.	크기, 밴드, 통계 및 좌표계입니다.
 Source	소스
 South	남
+South Polar Stereographic	남극 평사도법
 Square	정사각형
 Standalone Tables	독립 테이블
 Standard Deviation	표준편차
@@ -559,6 +589,7 @@ Terrain	지형
 Text	텍스트
 Text Symbol	텍스트 심볼
 the map has no layers	지도에 레이어가 없습니다
+The map is drawn in this coordinate system; layers are projected on the fly.	지도는 이 좌표계로 그려지며 레이어는 즉석에서 투영됩니다.
 The raster's data couldn't be read.	래스터 데이터를 읽을 수 없습니다.
 The raster's data couldn't be read: {path}	래스터 데이터를 읽을 수 없습니다: {path}
 Thermal	열화상
@@ -583,6 +614,7 @@ Undo the last change.	마지막 변경을 실행 취소합니다.
 Undo {action}	{action} 실행 취소
 Unique Values	고유 값
 Units	단위
+USA Contiguous Albers Equal Area	미국 본토 앨버스 정적도법
 Valid expression · {n} matching rows	유효한 표현식 · 일치하는 행 {n}개
 Vector and raster data	벡터 및 래스터 데이터
 Version {version}	버전 {version}
@@ -591,6 +623,7 @@ View › Windows	보기 › 창
 Visibility	가시성
 Visibility Range	가시 범위
 Visible	표시
+Web Mercator	웹 메르카토르
 Welcome to RustGIS	RustGIS에 오신 것을 환영합니다
 West	서
 WGS 84 / Globe	WGS 84 / 지구본
@@ -598,10 +631,21 @@ WGS 84 / Web Mercator	WGS 84 / Web Mercator
 Where	조건
 Where Clause	WHERE 절
 Windows	창
+Winkel Tripel	빙켈 트리펠 도법
 World	세계
 World Atlas	World Atlas
 World Atlas Sample	World Atlas 샘플
 World Countries	세계 국가
+World, compromise: low overall distortion, used for world atlases.	세계, 절충: 전체 왜곡이 적어 세계 지도책에 쓰입니다.
+World, compromise: neither equal-area nor conformal, balanced for wall maps.	세계, 절충: 정적도 정각도 아닌, 벽걸이 지도용으로 균형 잡힌 도법.
+World, compromise: rounded corners, gentle shapes near the poles.	세계, 절충: 둥근 모서리, 극 근처의 완만한 형태.
+World, conformal: the usual web map; areas grow towards the poles.	세계, 정각: 일반적인 웹 지도; 면적이 극으로 갈수록 커집니다.
+World, cylindrical: a compromise between Mercator and equal steps.	세계, 원통: 메르카토르와 등간격의 절충.
+World, cylindrical: equal steps of longitude and latitude.	세계, 원통: 경도와 위도가 등간격.
+World, equal-area, cylindrical: true sizes, flattened near the poles.	세계, 정적, 원통: 실제 면적, 극 근처에서 납작해집니다.
+World, equal-area: true sizes with a Robinson-like look.	세계, 정적: 실제 면적, 로빈슨과 비슷한 모양.
+World, equal-area: true sizes with rounded poles.	세계, 정적: 실제 면적, 둥근 극.
+World, equal-area: true sizes, shapes bend towards the edges.	세계, 정적: 실제 면적, 가장자리로 갈수록 형태가 휩니다.
 Yes	예
 Z factor	Z 계수
 Zoom about the pointer	포인터 기준 확대/축소
