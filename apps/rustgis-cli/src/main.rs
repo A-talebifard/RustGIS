@@ -11,6 +11,7 @@
 //! rustgis-cli ask [--sample | --project p.rgis | --data f.geojson …] "Which cities have over 10 million people?" \
 //!     [--provider anthropic|openai|gemini|openrouter|ollama|custom] [--model M] [--base-url URL] [--yes] [--save out.rgis] [--trace log.txt]
 //! rustgis-cli ask --models [--provider P]                # list the provider's models
+//! rustgis-cli mcp [--sample | --project p.rgis | --data f.geojson …] [--yes]   # an MCP server on stdio
 //! rustgis-cli parity                                    # ribbon feature coverage report
 //! rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id>
 //!                      | browse | get <id>] [--registry URL]
@@ -36,7 +37,7 @@ use serde_json::{Value, json};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  rustgis-cli commands | tools | parity\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id>] [--registry URL]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]"
+        "usage:\n  rustgis-cli commands | tools | parity\n  rustgis-cli plugins [install <file|folder> | uninstall <id> | enable <id> | disable <id> | browse | get <id>] [--registry URL]\n  rustgis-cli info <data>\n  rustgis-cli logo <out.png|out.ico|out.bmp> [--size N] [--canvas WxH --at X,Y (.bmp only)]\n  rustgis-cli render <data|project> <out.png> [--basemap NAME] [--tiles URL] [--width N] [--height N] [--dpi N] [--worldview auto|default|china]\n  rustgis-cli run [--sample] [--project P] [--data F]… --cmd 'id={{json}}'… [--save P] [--worldview auto|default|china]\n  rustgis-cli ask [--sample] [--project P] [--data F]… \"request\" [--provider P] [--model M] [--base-url URL] [--yes] [--save P]\n  rustgis-cli ask --models [--provider P]\n  rustgis-cli mcp [--sample] [--project P] [--data F]… [--yes]"
     );
     ExitCode::from(2)
 }
@@ -180,6 +181,77 @@ fn ask(s: &mut Session, args: &[String]) -> Result<(), String> {
     show(&a);
     if a.transcript.iter().any(|e| matches!(e, Entry::Error(_))) {
         return Err("the assistant couldn't finish".into());
+    }
+    Ok(())
+}
+
+/// `mcp`: a Model Context Protocol server on standard input and output, one JSON-RPC message per
+/// line, until the client closes its end. Only messages go to standard output; notes go to
+/// standard error.
+fn mcp(s: &mut Session, args: &[String]) -> Result<(), String> {
+    use std::io::{BufRead, Read};
+    let server = rustgis_assistant::mcp::Server::new(args.iter().any(|a| a == "--yes"));
+    eprintln!(
+        "rustgis-cli: MCP server ready ({} layers; file and network access {})",
+        s.map().layers.len(),
+        if server.allow_access { "allowed" } else { "off, --yes allows it" }
+    );
+    // The longest message read (a project's JSON can be large); longer lines are refused.
+    const MAX_LINE: u64 = 64 * 1024 * 1024;
+    let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let n = (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut buf).map_err(|e| format!("reading standard input: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let refuse = |stdout: &mut std::io::StdoutLock, why: &str| {
+            let e = json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": why}});
+            writeln!(stdout, "{e}").and_then(|()| stdout.flush()).is_ok()
+        };
+        if buf.len() as u64 > MAX_LINE && buf.last() != Some(&b'\n') {
+            // Skip the rest of the line, then say why it wasn't read.
+            loop {
+                buf.clear();
+                let m = (&mut stdin).take(MAX_LINE).read_until(b'\n', &mut buf).map_err(|e| format!("reading standard input: {e}"))?;
+                if m == 0 || buf.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+            if !refuse(&mut stdout, "message too long (64 MB at most)") {
+                break;
+            }
+            continue;
+        }
+        // Messages are UTF-8; a bad byte could change a path inside one, so it isn't guessed at.
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            if !refuse(&mut stdout, "message is not UTF-8") {
+                break;
+            }
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        // A last resort: a panic answers that request with an error instead of ending the server.
+        let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.handle(s, line))).unwrap_or_else(|_| {
+            // The panic message is already on standard error; the id lets the client match the error.
+            eprintln!("rustgis-cli: a request failed unexpectedly; the project may be partly changed");
+            let id = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|v| v.get("id").cloned())
+                .filter(|id| id.is_string() || id.is_number())
+                .unwrap_or(Value::Null);
+            Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "internal error"}}).to_string())
+        });
+        if let Some(reply) = reply {
+            // The client hung up.
+            if writeln!(stdout, "{reply}").and_then(|()| stdout.flush()).is_err() {
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -332,6 +404,10 @@ fn main() -> ExitCode {
                 run(&mut s, "project.saveAs", json!({"path": p}))?;
             }
             asked
+        }
+        "mcp" => {
+            open_inputs(&mut s, &args)?;
+            mcp(&mut s, &args)
         }
         "run" => {
             open_inputs(&mut s, &args)?;
