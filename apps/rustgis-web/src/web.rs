@@ -148,6 +148,48 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
+/// Makes an HTTP request (the AI assistant's calls to its model), returning the response of any
+/// status.
+async fn http(req: rustgis_ui_egui::rustgis_assistant::HttpRequest) -> Result<rustgis_ui_egui::rustgis_assistant::HttpResponse, String> {
+    use rustgis_ui_egui::rustgis_assistant::provider::{MAX_RESPONSE, allowed_url};
+    let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
+    if !allowed_url(&req.url) {
+        return Err(format!("{}: only HTTPS addresses, or plain HTTP on this computer or network, are allowed", req.url));
+    }
+    let window = web_sys::window().ok_or("no window")?;
+    let init = web_sys::RequestInit::new();
+    init.set_method(req.method);
+    // The API key is never carried on to another address.
+    init.set_redirect(web_sys::RequestRedirect::Error);
+    let headers = web_sys::Headers::new().map_err(err)?;
+    for (k, v) in &req.headers {
+        headers.set(k, v).map_err(err)?;
+    }
+    init.set_headers(&headers);
+    if let Some(body) = &req.body {
+        init.set_body(&wasm_bindgen::JsValue::from_str(body));
+    }
+    // A failed fetch here is usually the provider refusing browser requests (CORS) or no network.
+    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(&req.url, &init))
+        .await
+        .map_err(|_| "couldn't reach the provider (offline, or it doesn't accept requests from web pages)".to_string())?
+        .dyn_into()
+        .map_err(err)?;
+    let status = resp.status();
+    // Too large by its header: refused before it is read.
+    if let Ok(Some(len)) = resp.headers().get("content-length").map(|v| v.and_then(|s| s.parse::<u64>().ok()))
+        && len > MAX_RESPONSE as u64
+    {
+        return Err(format!("{len} bytes is too large"));
+    }
+    let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(err)?).await.map_err(err)?;
+    let bytes = js_sys::Uint8Array::new(&buf);
+    if bytes.length() as usize > MAX_RESPONSE {
+        return Err(format!("{} bytes is too large", bytes.length()));
+    }
+    Ok(rustgis_ui_egui::rustgis_assistant::HttpResponse { status, body: bytes.to_vec() })
+}
+
 fn services(inbox: Inbox, font_inbox: Inbox, ctx: egui::Context) -> Services {
     // Map tiles come through the browser's fetch (the app repaints when they arrive).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|url, done| {
@@ -158,6 +200,7 @@ fn services(inbox: Inbox, font_inbox: Inbox, ctx: egui::Context) -> Services {
     let (gl_list_ctx, gl_run_ctx) = (ctx.clone(), ctx.clone());
     let font_sink = font_inbox.clone();
     let fetch_ctx = ctx.clone();
+    let http_ctx = ctx.clone();
     Services {
         load_pref: Some(Box::new(|key: &str| storage().and_then(|s| s.get_item(&format!("rustgis.{key}")).ok().flatten()))),
         save_pref: Some(Box::new(|key: &str, value: &str| {
@@ -219,6 +262,14 @@ fn services(inbox: Inbox, font_inbox: Inbox, ctx: egui::Context) -> Services {
         inbox: Some(inbox),
         geolibre_manifests: Some(Box::new(move |slot| crate::geolibre::manifests(slot, gl_list_ctx.clone()))),
         geolibre_run: Some(Box::new(move |job, slot| crate::geolibre::run(job, slot, gl_run_ctx.clone()))),
+        http: Some(Box::new(move |req, slot| {
+            let ctx = http_ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let r = http(req).await;
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                ctx.request_repaint();
+            });
+        })),
         fetch: Some(Box::new(move |url: &str, slot| {
             let (url, ctx) = (url.to_string(), fetch_ctx.clone());
             wasm_bindgen_futures::spawn_local(async move {
