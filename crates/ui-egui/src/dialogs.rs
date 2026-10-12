@@ -37,10 +37,14 @@ impl Dialogs {
             "graphicText" => "graphicText",
             "camera" => "camera",
             "addTiles" => "addTiles",
+            "exportLayer" => "exportLayer",
             other => return Err(format!("unknown dialog '{other}'")),
         };
-        if matches!(name, "addField" | "calculateField" | "definitionQuery" | "renameLayer") && active.is_none() {
+        if matches!(name, "addField" | "calculateField" | "definitionQuery" | "renameLayer" | "exportLayer") && active.is_none() {
             return Err("select a layer in the Contents pane first".into());
+        }
+        if name == "exportLayer" && active.is_some_and(|l| l.is_raster()) {
+            return Err("Export Features needs a vector layer (Raster Data › Export writes a raster)".into());
         }
         if name == "selectByAttributes" && s.map().layers.is_empty() {
             return Err("the map has no layers".into());
@@ -74,6 +78,7 @@ impl Dialogs {
             "calculateField" => self.a = active.and_then(|l| l.dataset.fields.last()).map(|f| f.name.clone()).unwrap_or_default(),
             "definitionQuery" => self.text = active.and_then(|l| l.definition_query.clone()).unwrap_or_default(),
             "renameLayer" => self.text = active.map(|l| l.name.clone()).unwrap_or_default(),
+            "exportLayer" => self.mode = "geojson",
             _ => {}
         }
         Ok(())
@@ -93,6 +98,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
         "graphicText" => "Add Text",
         "camera" => "Camera",
         "addTiles" => "Add Tile Layer",
+        "exportLayer" => "Export Features",
         _ => "Rename Layer",
     };
     let t = Tokens::get(ctx);
@@ -129,6 +135,7 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
             }
             "coordinateSystem" => close = coordinate_system(app, ui, &t),
             "addTiles" => close = add_tiles(app, ui),
+            "exportLayer" => close = export_layer(app, ui),
             "camera" => {
                 egui::Grid::new("cam").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                     for (label, v) in [("Longitude", &mut app.dialogs.a), ("Latitude", &mut app.dialogs.b), ("Scale 1:", &mut app.dialogs.c)] {
@@ -237,6 +244,45 @@ pub fn show(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
+/// The formats Export Features writes: (name, extension). Format names aren't translated.
+pub const EXPORT_FORMATS: &[(&str, &str)] = &[
+    ("GeoJSON", "geojson"),
+    ("GeoPackage", "gpkg"),
+    ("GeoParquet", "parquet"),
+    ("Shapefile", "shp"),
+    ("FlatGeobuf", "fgb"),
+    ("CSV", "csv"),
+    ("KML", "kml"),
+    ("KMZ", "kmz"),
+    ("GPX", "gpx"),
+];
+
+/// Export Features: the active layer, in a format picked here (a file's type isn't changed by
+/// the filter chosen in a save dialog, and the web app has no save dialog).
+fn export_layer(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
+    let web = app.services.download.is_some();
+    egui::Grid::new("export_layer").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+        ui.label(tl!("Layer"));
+        ui.label(&app.dialogs.layer);
+        ui.end_row();
+        ui.label(tl!("Format"));
+        let shown = EXPORT_FORMATS.iter().find(|(_, e)| *e == app.dialogs.mode).map(|(l, _)| *l).unwrap_or("GeoJSON");
+        egui::ComboBox::from_id_salt("export_format").selected_text(shown).width(220.0).show_ui(ui, |ui| {
+            // GeoPackages are written with SQLite, which the web app doesn't have.
+            for (label, ext) in EXPORT_FORMATS.iter().filter(|(_, e)| !(web && *e == "gpkg")) {
+                ui.selectable_value(&mut app.dialogs.mode, *ext, *label);
+            }
+        });
+        ui.end_row();
+    });
+    if app.dialogs.mode == "shp" && web {
+        ui.label(egui::RichText::new(tl!("The Shapefile's files download as one zip.")).small().weak());
+    }
+    buttons(app, ui, if web { "Download" } else { "Export…" }, |app| {
+        app.run("ui.exportLayer", json!({"format": app.dialogs.mode})).map(|_| ())
+    })
+}
+
 /// Add Tile Layer: an XYZ/TMS/WMS template, vector tiles or a MapLibre style by address.
 fn add_tiles(app: &mut RustGisApp, ui: &mut egui::Ui) -> bool {
     use rustgis_engine::map::TileKind;
@@ -307,7 +353,7 @@ fn buttons(app: &mut RustGisApp, ui: &mut egui::Ui, ok: &str, f: impl FnOnce(&mu
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         let t = Tokens::get(ui.ctx());
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-        if crate::widgets::dialog_button(ui, ok, Some(t.accent), vec2(84.0, 28.0)).clicked() || enter {
+        if crate::widgets::dialog_button(ui, tl!(ok), Some(t.accent), vec2(84.0, 28.0)).clicked() || enter {
             match f(app) {
                 Ok(()) => close = true,
                 Err(e) => app.dialogs.error = Some(e),

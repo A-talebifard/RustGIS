@@ -1288,15 +1288,34 @@ impl RustGisApp {
                 let name = format!("{}.png", self.session.map().name);
                 self.download(&name, png);
             }
+            // Without a format, the Export Features dialog asks for one.
+            "ui.exportLayer" if p.get("format").and_then(Value::as_str).is_none() => {
+                self.dialogs.open("exportLayer", &self.session)?;
+            }
             "ui.exportLayer" if self.services.download.is_some() => {
                 let l = self
                     .session
                     .active_layer
                     .and_then(|id| self.session.map().layer(id))
                     .ok_or("select a layer in the Contents pane first")?;
-                let text = rustgis_engine::data::io::to_geojson(&l.dataset).to_string();
-                let name = format!("{}.geojson", l.name);
-                self.download(&name, text.into_bytes());
+                // Any format but GeoPackage, which needs SQLite.
+                let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
+                // A streamed layer exports its whole source, not the features read for the view.
+                let whole = if l.is_streamed() { Some(l.load_all()?) } else { None };
+                let written = rustgis_engine::data::io::write_bytes(whole.as_ref().unwrap_or(&l.dataset), &ext).map_err(|e| e.to_string());
+                let (bytes, left_out) = match written {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.session.notify(e.clone(), true);
+                        return Err(e);
+                    }
+                };
+                let ext = if ext == "shp" { "zip".to_string() } else { ext };
+                let name = format!("{}.{ext}", l.name);
+                if left_out > 0 {
+                    self.session.notify(format!("{name}: {left_out} features without drawable geometry were left out"), false);
+                }
+                self.download(&name, bytes);
             }
             "ui.exportRaster" if self.services.download.is_some() => {
                 // The web app: encode once and download.
@@ -1328,13 +1347,23 @@ impl RustGisApp {
                 }
             }
             "ui.exportLayer" => {
+                let ext = p.get("format").and_then(Value::as_str).unwrap_or("geojson").to_ascii_lowercase();
+                let label = dialogs::EXPORT_FORMATS
+                    .iter()
+                    .find(|(_, e)| *e == ext)
+                    .map(|(l, _)| *l)
+                    .ok_or_else(|| format!("unknown format '{ext}'"))?;
                 let name = self
                     .session
                     .active_layer
                     .and_then(|id| self.session.map().layer(id))
-                    .map(|l| format!("{}.geojson", l.name))
+                    .map(|l| format!("{}.{ext}", l.name))
                     .unwrap_or_default();
-                if let Some(path) = dialogs::pick_save(&name, &["geojson", "csv", "fgb"], tl!("GeoJSON, CSV or FlatGeobuf")) {
+                if let Some(path) = dialogs::pick_save(&name, &[ext.as_str()], label) {
+                    // The format chosen decides: its extension is added unless it was typed (a dot
+                    // in the name, as in "U.S. Cities", isn't taken for one).
+                    let typed = std::path::Path::new(&path).extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext));
+                    let path = if typed { path } else { format!("{path}.{ext}") };
                     return self.run("share.exportLayer", json!({"path": path}));
                 }
             }
