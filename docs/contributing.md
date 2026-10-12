@@ -33,8 +33,8 @@ provider and key first (see [AI Assistant](user-guide/assistant.md#choosing-a-mo
    `gh workflow run release-dry-run.yml -R opengeos/RustGIS --ref main -f version=<version>`
 3. When it passes, publish a GitHub release tagged `v<version>` (the tag must match `Cargo.toml`).
 
-The **Release** workflow then builds and attaches the Windows zip, macOS DMGs, Linux tarballs
-and `.deb` packages, and `SHA256SUMS`. To try the packaging locally:
+The **Release** workflow then builds and attaches the Windows installers, zip and MSIX, the
+macOS DMGs, the Linux tarballs, `.deb` and `.rpm` packages and AppImages, and `SHA256SUMS`. To try the packaging locally:
 
 ```sh
 cargo build --release --locked -p rustgis -p rustgis-cli
