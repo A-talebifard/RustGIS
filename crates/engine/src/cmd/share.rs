@@ -16,7 +16,7 @@ pub fn commands() -> Vec<C> {
         C::new("share.exportLayer", "Export Features", "Share › Output", export_layer)
             .view()
             .when(need_layer)
-            .params(r#"{"layer"?, "path": "*.geojson|*.csv"}"#),
+            .params(r#"{"layer"?, "path": "*.geojson|*.csv|*.fgb"}"#),
         C::new("share.exportTable", "Export Table", "Share › Output", |s, p| {
             let name = ps(p, "table").ok_or("table is required")?;
             let path = ps(p, "path").ok_or("path is required")?;
@@ -72,7 +72,15 @@ fn export_layer(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let path = ps(p, "path").ok_or("path is required")?.to_string();
     let l = s.map().layer(id).ok_or("no layer")?;
-    rustgis_data::io::write_path(&l.dataset, Path::new(&path)).map_err(|e| e.to_string())?;
+    // A streamed layer exports its whole source, not the features read for the view.
+    let whole = if l.is_streamed() { Some(l.load_all()?) } else { None };
+    let ds = whole.as_ref().unwrap_or(&l.dataset);
+    rustgis_data::io::write_path(ds, Path::new(&path)).map_err(|e| e.to_string())?;
+    // FlatGeobuf holds features with geometry only.
+    let without = ds.features.iter().filter(|f| f.geometry.is_none()).count();
+    if without > 0 && path.to_ascii_lowercase().ends_with(".fgb") {
+        s.notify(format!("{path}: {without} features without geometry were left out"), false);
+    }
     s.notify(format!("Exported {path}"), false);
     Ok(json!({"path": path}))
 }

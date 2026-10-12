@@ -267,6 +267,42 @@ pub(crate) struct PendingRun {
     pub millis: u64,
 }
 
+/// Empties the windows of a project's streamed layers (they are read again from their sources).
+fn strip_windows(p: &mut Project) {
+    for l in p.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
+        if let Some(src) = &mut l.source {
+            src.reset();
+            l.dataset.features = Vec::new();
+            l.selection.clear();
+            l.touch_geometry();
+        }
+    }
+}
+
+/// The first streamed layer whose features or fields differ between two versions of a project
+/// for a reason other than a read of its source.
+fn edited_streamed(before: &Project, after: &Project) -> Option<String> {
+    let schema = |l: &rustgis_map::Layer| l.dataset.fields.iter().map(|f| (f.name.clone(), f.ty)).collect::<Vec<_>>();
+    for (mb, ma) in before.maps.iter().zip(&after.maps) {
+        for la in ma.layers.iter().filter(|l| l.is_streamed()) {
+            let Some(lb) = mb.layers.iter().find(|l| l.id == la.id && l.is_streamed()) else { continue };
+            let reads = |l: &rustgis_map::Layer| l.source.as_ref().map(|s| s.reads);
+            if reads(la) == reads(lb) && (la.dataset.features != lb.dataset.features || schema(la) != schema(lb)) {
+                return Some(la.name.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Commands that change a layer's features or fields, refused on streamed layers (whose features
+/// are a window read again from the file as the view moves, so edits would be lost).
+fn edits_features(id: &str) -> bool {
+    const SETTINGS: &[&str] =
+        &["edit.enable", "edit.settings", "edit.status", "edit.template", "edit.snapping", "edit.snap", "edit.tools", "edit.copy"];
+    id.starts_with("edit.") && !SETTINGS.contains(&id)
+}
+
 impl Session {
     pub fn new(project: Project) -> Self {
         // Cheap: the suite's tools load the first time a tool list is needed.
@@ -340,6 +376,12 @@ impl Session {
             return Err(format!("{}: {why}", spec.label));
         }
         let (run, mutates, label) = (spec.run, spec.mutates, spec.label);
+        if mutates && edits_features(id) {
+            let target = named.or(active).and_then(|l| self.map().layer(l));
+            if let Some(l) = target.filter(|l| l.is_streamed()) {
+                return Err(format!("{label}: {} is read in place from its file; Load All Features (layer.loadAll) to edit it", l.name));
+            }
+        }
         self.guarded(label, mutates, |s| run(s, params))
     }
 
@@ -351,8 +393,19 @@ impl Session {
         let counts = mutates.then(|| self.edit_counts.clone());
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)))
             .unwrap_or_else(|_| Err(format!("{label} failed unexpectedly; the project was restored")));
+        // A command that changed a streamed layer's features or fields (not by reading its
+        // source) would lose the change at the next read: undone, with a way to edit it instead.
+        let res = match (&res, &snapshot) {
+            (Ok(_), Some(snap)) => match edited_streamed(snap, &self.project) {
+                Some(name) => Err(format!("{label}: {name} is read in place from its file; Load All Features (layer.loadAll) to edit it")),
+                None => res,
+            },
+            _ => res,
+        };
         match (&res, snapshot) {
-            (Ok(_), Some(snap)) => {
+            (Ok(_), Some(mut snap)) => {
+                // Undo keeps streamed layers' sources, not their windows: they read the view again.
+                strip_windows(&mut snap);
                 self.undo.push((snap, label));
                 if self.undo.len() > UNDO_LIMIT {
                     self.undo.remove(0);
