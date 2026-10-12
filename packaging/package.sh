@@ -5,7 +5,7 @@
 #
 # Linux: a .tar.gz and a .deb. macOS: a .dmg holding RustGIS.app, plus a .tar.gz of the CLI
 # (signed and notarized when the MACOS_SIGN_IDENTITY / APPLE_API_* variables are set).
-# Windows (Git Bash): a portable .zip. Build first with
+# Windows (Git Bash): a portable .zip and an .msix for the Microsoft Store. Build first with
 # `cargo build --release --locked -p rustgis -p rustgis-cli [--target T]`.
 set -euo pipefail
 
@@ -154,10 +154,39 @@ CONTROL
     ;;
 
   windows)
+    # Portable zip: unzip anywhere and run, no installer or admin rights.
     d="$work/$name"
     mkdir -p "$d"
     cp "$bin/rustgis.exe" "$bin/rustgis-cli.exe" "$root/LICENSE" "$root/README.md" "$d/"
-    (cd "$work" && 7z a -tzip -bso0 "$dist/$name.zip" "$name")
+    sed "s/@VERSION@/$version/g" "$root/packaging/windows/README-portable.txt" > "$d/README.txt"
+    (cd "$work" && 7z a -tzip -bso0 "$dist/$name-portable.zip" "$name")
+
+    # MSIX package for the Microsoft Store, which signs it on ingestion. The identity must
+    # match the product reserved in Partner Center (Product identity); override it for a
+    # self-signed sideload build.
+    case "$arch" in x86_64) msixarch=x64 ;; aarch64) msixarch=arm64 ;; *) msixarch="$arch" ;; esac
+    m="$work/msix"
+    mkdir -p "$m/Assets"
+    cp "$bin/rustgis.exe" "$bin/rustgis-cli.exe" "$m/"
+    logo "$m/Assets/Square44x44Logo.png" 44
+    logo "$m/Assets/Square150x150Logo.png" 150
+    logo "$m/Assets/StoreLogo.png" 50
+    # A value for the manifest: XML-escaped, then escaped for a sed replacement.
+    xmlval() { printf '%s' "$1" | sed -e 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' -e 's/[\\|&]/\\&/g'; }
+    # MSIX versions are four numbers: drop a pre-release suffix (0.2.0-rc.1 -> 0.2.0.0).
+    sed -e "s|@VERSION@|${version%%-*}.0|g" -e "s|@ARCH@|$msixarch|g" \
+      -e "s|@NAME@|$(xmlval "${MSIX_NAME:-OpenGeospatialSolutions.RustGIS}")|g" \
+      -e "s|@PUBLISHER@|$(xmlval "${MSIX_PUBLISHER:-CN=E6AE8172-DC4F-4F79-844B-9D84204BF95A}")|g" \
+      -e "s|@PUBLISHER_DISPLAY_NAME@|$(xmlval "${MSIX_PUBLISHER_DISPLAY_NAME:-Open Geospatial Solutions}")|g" \
+      "$root/packaging/windows/AppxManifest.xml" > "$m/AppxManifest.xml"
+    makeappx="$(command -v makeappx.exe || true)"
+    if [ -z "$makeappx" ]; then
+      # The host's own build of the SDK tools, x64 or ARM64.
+      case "$(uname -m)" in aarch64 | arm64) sdkarch=arm64 ;; *) sdkarch=x64 ;; esac
+      makeappx="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin/"*/"$sdkarch"/makeappx.exe 2>/dev/null | sort -V | tail -1)"
+    fi
+    [ -n "$makeappx" ] || { echo "makeappx.exe not found: install the Windows SDK" >&2; exit 1; }
+    MSYS2_ARG_CONV_EXCL='*' "$makeappx" pack /d "$(cygpath -w "$m")" /p "$(cygpath -w "$dist/$name.msix")" /o
     ;;
 esac
 
