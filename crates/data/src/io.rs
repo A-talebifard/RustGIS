@@ -7,10 +7,57 @@ use serde_json::{Map, Value as Json, json};
 use crate::{Coord, DataError, Dataset, Field, FieldType, Geometry, GeometryType, ReadReport, Result, Value};
 
 /// Largest file read into memory (256 MiB). Parsing JSON can take several times the file size.
-const MAX_BYTES: u64 = 256 << 20;
+pub(crate) const MAX_BYTES: u64 = 256 << 20;
 
 /// File types the readers understand, for open dialogs.
-pub const READ_EXTENSIONS: &[&str] = &["geojson", "json", "csv", "txt", "shp", "zip", "gpkg", "parquet", "geoparquet", "fgb"];
+pub const READ_EXTENSIONS: &[&str] =
+    &["geojson", "json", "csv", "txt", "shp", "zip", "kml", "kmz", "gpx", "gpkg", "parquet", "geoparquet", "fgb"];
+
+/// Most XML nodes parsed from one document (KML, GPX): each costs tens of bytes, and the
+/// browser's memory is smaller (a 1M-point GPX track is about 8M nodes).
+pub(crate) const XML_NODES: u32 = if cfg!(target_arch = "wasm32") { 8_000_000 } else { 25_000_000 };
+
+/// A layer read from a file that holds several, with the styles its features' `style` field
+/// names (KML).
+pub struct LayerRead {
+    pub dataset: Dataset,
+    pub report: ReadReport,
+    pub styles: Vec<(String, crate::kml::Style)>,
+}
+
+/// Whether a file holds several layers ([`read_layers`] reads them all): a zip, KML, KMZ or GPX.
+pub fn is_multi_layer_name(name: &str) -> bool {
+    let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "zip" | "kml" | "kmz" | "gpx")
+}
+
+/// Reads every layer of a file held in memory: the Shapefiles and other files of a zip, a KML or
+/// KMZ's points, lines and polygons (with their styles), or a GPX's waypoints, routes, tracks and
+/// track points. Other files give their one layer.
+pub fn read_layers(file_name: &str, bytes: &[u8]) -> Result<Vec<LayerRead>> {
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(DataError::Format(format!("file is too large ({} bytes)", bytes.len())));
+    }
+    let ext = Path::new(file_name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let plain =
+        |v: Vec<(Dataset, ReadReport)>| v.into_iter().map(|(dataset, report)| LayerRead { dataset, report, styles: Vec::new() }).collect();
+    let mut out: Vec<LayerRead> = match ext.as_str() {
+        "zip" => plain(read_zip(file_name, bytes)?),
+        "kml" | "kmz" => crate::kml::read(file_name, bytes)?
+            .into_iter()
+            .map(|l| LayerRead { dataset: l.dataset, report: l.report, styles: l.styles })
+            .collect(),
+        "gpx" => plain(crate::gpx::read(file_name, bytes)?),
+        _ => plain(vec![read_bytes(file_name, bytes)?]),
+    };
+    if out.is_empty() {
+        return Err(DataError::Format(format!("{file_name}: nothing to draw")));
+    }
+    for l in &mut out {
+        l.dataset.source.get_or_insert_with(|| file_name.to_string());
+    }
+    Ok(out)
+}
 
 /// Reads vector data held in memory (a browser upload or a drop), choosing the reader by the
 /// file name's extension. A Shapefile needs its sidecar files, so it comes zipped (`.zip`, whose
@@ -27,11 +74,12 @@ pub fn read_bytes(file_name: &str, bytes: &[u8]) -> Result<(Dataset, ReadReport)
         "geojson" | "json" => read_geojson(text()?, &name)?,
         "csv" | "txt" => read_csv(text()?, &name)?,
         "shp" => return Err(DataError::Unsupported("shp on its own: zip it with its .dbf, .shx and .prj and add the zip".into())),
-        // The first layer of the archive (`read_zip` reads them all), saying what else it holds.
-        "zip" => {
-            let layers = read_zip(file_name, bytes)?;
-            let rest: Vec<String> = layers.iter().skip(1).map(|(d, _)| d.name.clone()).collect();
-            let mut first = layers.into_iter().next().ok_or_else(|| DataError::Format(format!("{file_name}: empty")))?;
+        // The first layer (`read_layers` reads them all), saying what else the file holds.
+        "zip" | "kml" | "kmz" | "gpx" => {
+            let layers = read_layers(file_name, bytes)?;
+            let rest: Vec<String> = layers.iter().skip(1).map(|l| l.dataset.name.clone()).collect();
+            let first = layers.into_iter().next().ok_or_else(|| DataError::Format(format!("{file_name}: empty")))?;
+            let mut first = (first.dataset, first.report);
             if !rest.is_empty() {
                 let leaf = Path::new(file_name).file_name().and_then(|n| n.to_str()).unwrap_or(file_name);
                 first.1.messages.push(format!("{leaf}: read its first layer; it also holds {}", rest.join(", ")));
@@ -81,7 +129,7 @@ pub fn read_path(path: &Path) -> Result<(Dataset, ReadReport)> {
             }
             read_shapefile(path, &name)?
         }
-        "zip" => {
+        "zip" | "kml" | "kmz" | "gpx" => {
             check_size(path)?;
             read_bytes(&path.display().to_string(), &std::fs::read(path)?)?
         }
@@ -480,27 +528,7 @@ pub fn read_csv(text: &str, name: &str) -> Result<(Dataset, ReadReport)> {
     let fields: Vec<Field> = headers
         .iter()
         .enumerate()
-        .map(|(i, h)| {
-            let vals = rows.iter().filter_map(|r| r.get(i)).map(|s| s.trim()).filter(|s| !s.is_empty());
-            let mut ty: Option<FieldType> = None;
-            for v in vals {
-                let t = if has_leading_zero(v) {
-                    // Identifiers such as ZIP codes keep their leading zeros.
-                    FieldType::Text
-                } else if v.parse::<i64>().is_ok() {
-                    FieldType::Integer
-                } else if v.parse::<f64>().is_ok_and(f64::is_finite) {
-                    FieldType::Double
-                } else {
-                    FieldType::Text
-                };
-                ty = Some(match ty {
-                    None => t,
-                    Some(prev) => widen(prev, Some(t)),
-                });
-            }
-            Field::new(h.trim(), ty.unwrap_or(FieldType::Text))
-        })
+        .map(|(i, h)| Field::new(h.trim(), text_type(rows.iter().filter_map(|r| r.get(i)).map(|s| s.as_str()))))
         .collect();
     let mut report = ReadReport { skipped: malformed, ..ReadReport::default() };
     if malformed > 0 {
@@ -530,6 +558,56 @@ pub fn read_csv(text: &str, name: &str) -> Result<(Dataset, ReadReport)> {
         report.messages.push(format!("{} rows had no usable coordinates", report.skipped - malformed));
     }
     Ok((ds, report))
+}
+
+/// The type of a column of text values: Integer or Double when every non-empty value is one,
+/// otherwise (or with no values) Text.
+pub(crate) fn text_type<'a>(vals: impl Iterator<Item = &'a str>) -> FieldType {
+    let mut ty: Option<FieldType> = None;
+    for v in vals.map(str::trim).filter(|s| !s.is_empty()) {
+        let t = if has_leading_zero(v) {
+            // Identifiers such as ZIP codes keep their leading zeros.
+            FieldType::Text
+        } else if v.parse::<i64>().is_ok() {
+            FieldType::Integer
+        } else if v.parse::<f64>().is_ok_and(f64::is_finite) {
+            FieldType::Double
+        } else {
+            FieldType::Text
+        };
+        ty = Some(match ty {
+            None => t,
+            Some(prev) => widen(prev, Some(t)),
+        });
+    }
+    ty.unwrap_or(FieldType::Text)
+}
+
+/// Types a dataset's Text columns from their values (see [`text_type`]), for readers whose
+/// formats hold every value as text (KML, GPX); the columns named in `keep` stay text.
+pub(crate) fn type_text_columns(ds: &mut Dataset, keep: &[&str]) {
+    for i in 0..ds.fields.len() {
+        if ds.fields.get(i).is_none_or(|f| f.ty != FieldType::Text || keep.iter().any(|k| f.name.eq_ignore_ascii_case(k))) {
+            continue;
+        }
+        let ty = text_type(ds.features.iter().filter_map(|f| match f.attrs.get(i) {
+            Some(Value::Text(t)) => Some(t.as_str()),
+            _ => None,
+        }));
+        if ty == FieldType::Text {
+            continue;
+        }
+        if let Some(f) = ds.fields.get_mut(i) {
+            f.ty = ty;
+        }
+        for f in &mut ds.features {
+            if let Some(v) = f.attrs.get_mut(i)
+                && let Value::Text(t) = v
+            {
+                *v = if t.trim().is_empty() { Value::Null } else { Value::parse(t, ty) };
+            }
+        }
+    }
 }
 
 /// `0123` or `-007` (but not `0`, `0.5` or `-0.5`): a code, not a number.
