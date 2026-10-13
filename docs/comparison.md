@@ -61,7 +61,7 @@ engine, choose RustGIS. Both keep your data on your machine.
 | **Cloud-native data** | GeoParquet, FlatGeobuf (large files read in place), PMTiles over HTTP byte ranges, cloud-optimised GeoTIFF (as files) | GeoParquet, FlatGeobuf, PMTiles, COG, Zarr, streamed over HTTP | GeoParquet, FlatGeobuf, PMTiles, COG, Zarr | GeoParquet, COG, Zarr | Hosted layers |
 | **Web maps and tiles** | XYZ/TMS/WMS raster tiles, Mapbox Vector Tiles, MapLibre styles | XYZ, WMS/WFS/WMTS, OGC API, vector tiles, MapLibre styles | Full OGC support, vector tiles | Full OGC support | Yes |
 | **Coordinate systems** | Rasters in any EPSG code, reprojected on the fly; the map in presets or projected EPSG codes | Reprojects on import, EPSG catalog | Full PROJ support | Full support | Web Mercator focus |
-| **STAC, databases, Esri services** | — | STAC browser, PostGIS, DuckDB, Iceberg, ArcGIS services, File Geodatabase (desktop) | STAC, PostGIS, SpatiaLite, Oracle, SQL Server, ArcGIS services | Enterprise geodatabases, Esri services | Hosted only |
+| **STAC, databases, Esri services** | PostgreSQL/PostGIS and DuckDB databases (desktop, through DuckDB) | STAC browser, PostGIS, DuckDB, Iceberg, ArcGIS services, File Geodatabase (desktop) | STAC, PostGIS, SpatiaLite, Oracle, SQL Server, ArcGIS services | Enterprise geodatabases, Esri services | Hosted only |
 | **3D** | A 3D globe; 2.5D extrusion with lighting and shadows; glTF scene export | Cesium globe, 3D Tiles, I3S, LiDAR, Gaussian splats | Point clouds, 3D map view | **Deepest 3D**: scenes, I3S, mesh, LAS | Scene Viewer |
 
 ## Analysis and processing
@@ -126,8 +126,8 @@ opens, and writes MapLibre styles and OGC API Features collections for the web.
 
 Stated plainly, so the tables above are worth trusting:
 
-- **Format breadth.** There is no database connection (beyond DuckDB files) yet, and the web
-  app doesn't write GeoPackages. Other vector formats (GML,
+- **Format breadth.** Databases are DuckDB files and PostgreSQL/PostGIS (through DuckDB, on the
+  desktop), and the web app doesn't write GeoPackages. Other vector formats (GML,
   File Geodatabase, DXF…) need GDAL installed, and SQL queries need DuckDB, which RustGIS calls
   rather than links; GDAL rasters aren't read.
 - **Coordinate systems.** Vector data is stored in longitude/latitude; there is no full PROJ.
