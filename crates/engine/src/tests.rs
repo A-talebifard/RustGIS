@@ -89,6 +89,36 @@ fn layer_move_reorders_in_one_undo_step() {
 }
 
 #[test]
+fn table_remove_takes_a_standalone_table_out_of_the_project() {
+    let mut s = world();
+    let names = |s: &Session| s.project.tables.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    for name in ["sites", "notes"] {
+        s.run("layer.addDataText", &json!({"fileName": format!("{name}.csv"), "text": "id,street\n1,Champ de Mars\n"})).unwrap();
+    }
+    assert_eq!(names(&s), ["sites", "notes"]);
+    let (depth, layers) = (s.undo_depth(), s.map().layers.len());
+    s.run("table.remove", &json!({"table": "sites"})).unwrap();
+    assert_eq!(names(&s), ["notes"]);
+    assert_eq!((s.undo_depth(), s.map().layers.len()), (depth + 1, layers), "one undo step, and the map's layers stay");
+    // A table that isn't there, a layer's name and a missing or junk name fail and leave no undo step.
+    for p in [json!({"table": "sites"}), json!({"table": "Cities"}), json!({}), json!({"table": 3}), Value::Null] {
+        assert!(s.run("table.remove", &p).is_err(), "{p}");
+    }
+    assert_eq!((names(&s), s.undo_depth()), (vec!["notes".to_string()], depth + 1));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(names(&s), ["sites", "notes"]);
+    // Two tables of one name: `at` says which. A position that holds another table, or none, fails.
+    s.run("layer.addDataText", &json!({"fileName": "notes.csv", "text": "id,city\n1,Paris\n"})).unwrap();
+    assert_eq!(names(&s), ["sites", "notes", "notes"]);
+    for at in [json!(0), json!(3), json!(-1), json!(1.5), json!("2")] {
+        assert!(s.run("table.remove", &json!({"table": "notes", "at": at})).is_err(), "{at}");
+    }
+    s.run("table.remove", &json!({"table": "notes", "at": 2})).unwrap();
+    assert_eq!(names(&s), ["sites", "notes"]);
+    assert!(s.project.tables.get(1).is_some_and(|t| t.field_index("street").is_some()), "the first of the two stays");
+}
+
+#[test]
 fn select_symbolize_undo_redo() {
     let mut s = world();
     let r = s.run("select.byAttributes", &json!({"layer": "Countries", "where": "continent = 'Africa'"})).unwrap();
