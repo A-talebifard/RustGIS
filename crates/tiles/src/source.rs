@@ -174,6 +174,25 @@ pub fn resolve(spec: &Spec) -> Resolve {
                 return Resolve::Failed(format!("{u}: mapbox:// addresses need Mapbox's own library"));
             }
             let u = template::join(&base, &u);
+            // An ArcGIS vector tile service answers its TileJSON-like description as JSON only
+            // when asked (`?f=json`); its styles point at the service itself.
+            let path = u.split(['?', '#']).next().unwrap_or(&u).trim_end_matches('/').to_string();
+            // The query's other parameters (a token) stay; `f` is the one asked for.
+            let others: Vec<&str> = u
+                .split('#')
+                .next()
+                .and_then(|x| x.split_once('?'))
+                .map(|(_, q)| q)
+                .unwrap_or("")
+                .split('&')
+                .filter(|kv| !kv.is_empty() && !kv.split_once('=').map(|(k, _)| k).unwrap_or(kv).eq_ignore_ascii_case("f"))
+                .collect();
+            let u = if path.to_ascii_lowercase().ends_with("/vectortileserver") {
+                // With the slash, so the tile paths it gives resolve inside the service.
+                if others.is_empty() { format!("{path}/?f=json") } else { format!("{path}/?f=json&{}", others.join("&")) }
+            } else {
+                u
+            };
             // A style's TileJSON is the style's choice; a vector layer's is the user's.
             if let Err(e) = address::check(&u, (spec.kind == Kind::Style).then_some(base.as_str())) {
                 return Resolve::Failed(e);
