@@ -5,6 +5,7 @@ use egui::{Align2, CornerRadius, Key, KeyboardShortcut, Modifiers, Rect, Sense, 
 use rustgis_engine::Tool;
 use serde_json::{Value, json};
 
+use crate::mapview::Toast;
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{small, text_w};
 use crate::{RustGisApp, icons};
@@ -511,31 +512,35 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
-/// Toasts for recent notices (errors stay longer).
+/// Toasts for recent notices (errors stay longer, and any stays while the pointer is on it, so
+/// its text can be selected and copied).
 pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let now = ctx.input(|i| i.time);
     let total = app.session.notices.len();
     if total > app.map.notices_seen {
         for n in app.session.notices.iter().skip(app.map.notices_seen) {
-            app.map.toasts.push((n.text.clone(), n.error, now));
+            app.map.toasts_made += 1;
+            app.map.toasts.push(Toast { text: n.text.clone(), error: n.error, at: now, id: app.map.toasts_made });
         }
         app.map.notices_seen = total;
     }
-    app.map.toasts.retain(|(_, err, at)| now - at < if *err { 6.0 } else { 3.0 });
+    app.map.toasts.retain(|toast| now - toast.at < if toast.error { 6.0 } else { 3.0 });
     if app.map.toasts.is_empty() {
         return;
     }
     ctx.request_repaint_after(std::time::Duration::from_millis(250));
     let screen = ctx.content_rect();
     let mut y = screen.max.y - 40.0;
-    for (i, (text, err, _)) in app.map.toasts.iter().rev().take(3).enumerate() {
-        egui::Area::new(egui::Id::new(("toast", i))).fixed_pos(pos2(screen.max.x - 380.0, y - 44.0)).order(egui::Order::Tooltip).show(
-            ctx,
-            |ui| {
+    for toast in app.map.toasts.iter_mut().rev().take(3) {
+        // Keyed by the notice, not the slot, so a selection stays with its text as toasts come and go.
+        let shown = egui::Area::new(egui::Id::new(("toast", toast.id)))
+            .fixed_pos(pos2(screen.max.x - 380.0, y - 44.0))
+            .order(egui::Order::Tooltip)
+            .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(t.menu)
-                    .stroke(Stroke::new(1.0, if *err { t.red } else { t.border_strong }))
+                    .stroke(Stroke::new(1.0, if toast.error { t.red } else { t.border_strong }))
                     .corner_radius(CornerRadius::same(8))
                     .shadow(egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: t.shadow })
                     .inner_margin(egui::Margin::symmetric(12, 8))
@@ -543,12 +548,14 @@ pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
                         ui.set_width(340.0);
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                            ui.painter().circle_filled(r.center(), 6.0, if *err { t.red } else { t.green });
-                            ui.label(egui::RichText::new(text).size(12.0));
+                            ui.painter().circle_filled(r.center(), 6.0, if toast.error { t.red } else { t.green });
+                            ui.add(egui::Label::new(egui::RichText::new(toast.text.as_str()).size(12.0)).wrap().selectable(true));
                         });
                     });
-            },
-        );
+            });
+        if shown.response.contains_pointer() {
+            toast.at = now;
+        }
         y -= 52.0;
     }
 }

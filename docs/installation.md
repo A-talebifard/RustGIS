@@ -124,8 +124,10 @@ does: it starts blank, keeps its settings in memory rather than in the browser, 
 the project with the page that frames it through `postMessage` (the messages are described in
 `apps/rustgis-web/src/embed.rs`).
 
-To build it yourself, install [Trunk](https://trunkrs.dev) and the `wasm32-unknown-unknown`
-target, then:
+To build it yourself, install [Trunk](https://trunkrs.dev), the `wasm32-unknown-unknown` target
+and clang (it compiles the Zstandard decoder used for GeoTIFFs to WebAssembly). Linux
+distributions' clang can; on macOS, Apple's can't, so install `llvm` with Homebrew and put its
+`bin` first on your `PATH`. Then:
 
 ```sh
 cd apps/rustgis-web

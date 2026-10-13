@@ -15,7 +15,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 csv = { workspace = true }
 shapefile = { workspace = true }
-tiff = { workspace = true }
+# Zstandard, the usual compression of COGs, is C code that compiles to WebAssembly with clang
+# (on the CI runners), so the browser decodes it too.
+tiff = { workspace = true, features = ["zstd"] }
 proj4rs = { workspace = true }
 crs-definitions = { workspace = true }
 miniz_oxide = { workspace = true }
@@ -42,3 +44,7 @@ rusqlite = { workspace = true }
 parquet = { workspace = true, features = ["arrow"] }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Writing Zstandard-compressed GeoTIFFs.
+zstd = { workspace = true }
