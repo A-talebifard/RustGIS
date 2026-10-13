@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use rustgis_engine::{Project, Session};
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, Entry, MAX_STEPS, Step, run_blocking};
+use crate::agent::{Agent, Entry, INTERNAL_ERROR, MAX_STEPS, Step, run_blocking};
 use crate::provider::*;
 use crate::tools;
 
@@ -273,6 +273,46 @@ fn hostile_replies_never_panic() {
     assert_eq!(a.receive(a.generation(), Err("offline".into()), &mut s), Step::Done);
     assert!(matches!(a.transcript.last(), Some(Entry::Error(e)) if e == "offline"));
     assert!(!a.busy());
+}
+
+#[test]
+fn a_panic_while_handling_a_reply_ends_the_turn_instead_of_the_app() {
+    // Issue #110: the desktop app quit while the assistant handled a reply. A panic in a step
+    // now becomes an error in the transcript, and the conversation stays usable.
+    let mut s = sample();
+    let mut a = Agent::new(cfg("openai"), &s);
+    let Step::Send(_) = a.ask("label the cities", &s) else { panic!("expected a request") };
+    // Two calls: the first panics while it runs, the second is still queued.
+    let two = json!({"choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "test_panic", "arguments": "{}"}},
+        {"id": "c2", "type": "function", "function": {"name": "search_commands", "arguments": "{\"query\": \"label\"}"}}]},
+        "finish_reason": "tool_calls"}]});
+    let step = a.receive(a.generation(), ok(two), &mut s);
+    assert_eq!(step, Step::Done);
+    assert!(!a.busy());
+    assert!(a.transcript.iter().any(|e| matches!(e, Entry::Error(m) if m == INTERNAL_ERROR)));
+    assert!(a.transcript.iter().any(|e| matches!(e, Entry::Note(m) if m.contains("a test tool panicked"))));
+    // The next request answers the call that failed, so the provider accepts it.
+    let Step::Send(req) = a.ask("try again", &s) else { panic!("expected a request") };
+    let b = body(&req);
+    let messages = b["messages"].as_array().cloned().unwrap_or_default();
+    let result = |id: &str| {
+        messages
+            .iter()
+            .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    // The call that was running may have done something; the queued one never ran.
+    assert!(result("c1").contains("may have partly taken effect"), "{messages:?}");
+    assert!(result("c2").starts_with("Not run"), "{messages:?}");
+    // Results go back in the order of the calls (Gemini matches id-less calls by order).
+    let ids: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["tool_call_id"].as_str()).collect();
+    assert_eq!(ids, ["c1", "c2"]);
+    // A reply after the failure is read as usual.
+    assert_eq!(a.receive(a.generation(), ok(say("Done.")), &mut s), Step::Done);
+    assert!(matches!(a.transcript.last(), Some(Entry::Assistant(t)) if t == "Done."));
 }
 
 #[test]

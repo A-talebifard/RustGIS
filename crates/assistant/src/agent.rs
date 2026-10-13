@@ -48,6 +48,9 @@ enum State {
     Calls(VecDeque<ToolCall>, Vec<ToolResult>),
 }
 
+/// What the transcript says when RustGIS itself fails while handling a reply.
+pub const INTERNAL_ERROR: &str = "RustGIS ran into an internal error while handling the model's reply, so the request was stopped. Please report it at https://github.com/opengeos/RustGIS/issues.";
+
 pub struct Agent {
     pub config: Config,
     turns: Vec<Turn>,
@@ -119,6 +122,10 @@ impl Agent {
 
     /// The user's message. The map context goes with it when it changed since the model last saw it.
     pub fn ask(&mut self, text: &str, s: &Session) -> Step {
+        self.guard(|a| a.ask_unguarded(text, s))
+    }
+
+    fn ask_unguarded(&mut self, text: &str, s: &Session) -> Step {
         let text = text.trim();
         if text.is_empty() || self.busy() {
             return Step::Done;
@@ -144,6 +151,10 @@ impl Agent {
 
     /// The response to the last [`Step::Send`] of generation `generation`.
     pub fn receive(&mut self, generation: u64, resp: Result<HttpResponse, String>, s: &mut Session) -> Step {
+        self.guard(|a| a.receive_unguarded(generation, resp, s))
+    }
+
+    fn receive_unguarded(&mut self, generation: u64, resp: Result<HttpResponse, String>, s: &mut Session) -> Step {
         if generation != self.generation || !self.waiting() {
             return Step::Done;
         }
@@ -219,6 +230,10 @@ impl Agent {
     /// The user's answer about [`Agent::pending`]; `always` approves calls like it for the rest of
     /// the conversation.
     pub fn decide(&mut self, allow: bool, always: bool, s: &mut Session) -> Step {
+        self.guard(|a| a.decide_unguarded(allow, always, s))
+    }
+
+    fn decide_unguarded(&mut self, allow: bool, always: bool, s: &mut Session) -> Step {
         if !matches!(self.state, State::Calls(..)) {
             return Step::Done;
         }
@@ -235,11 +250,48 @@ impl Agent {
 
     /// Stops the run: a request out is forgotten, calls not yet run are skipped.
     pub fn stop(&mut self) {
+        if !self.busy() {
+            return;
+        }
+        self.halt(Entry::Note("Stopped.".into()), "Stopped by the user.", "Stopped by the user.");
+    }
+
+    /// Runs one step of the conversation. A bug in RustGIS that panics while reading a reply or
+    /// running its calls ends the turn with an error in the transcript instead of taking the app
+    /// down with it (the commands it runs are guarded the same way by `Session::run`). As there,
+    /// the session keeps whatever a tool changed before it failed. Where panics abort instead of
+    /// unwinding (the WebAssembly build), this guard can't help.
+    fn guard(&mut self, f: impl FnOnce(&mut Self) -> Step) -> Step {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *self))) {
+            Ok(step) => step,
+            Err(payload) => {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                self.halt(
+                    Entry::Error(INTERNAL_ERROR.into()),
+                    "Not run: RustGIS ran into an internal error before this call.",
+                    "RustGIS failed while running this call, so it may have partly taken effect. Check before running it again.",
+                );
+                if !detail.is_empty() {
+                    self.transcript.push(Entry::Note(tools::clip(&detail, 300)));
+                }
+                Step::Done
+            }
+        }
+    }
+
+    /// Ends the run, leaving a conversation the provider accepts, and notes why. Calls still
+    /// queued get the result `queued`; a call that was running when the run ended (it has left the
+    /// queue but has no result) gets `interrupted`.
+    fn halt(&mut self, why: Entry, queued: &str, interrupted: &str) {
         match std::mem::replace(&mut self.state, State::Idle) {
-            State::Idle => return,
             // The unanswered message is dropped: two user turns in a row are refused by some
-            // providers. The map context goes again with the next one.
-            State::Waiting => {
+            // providers. The map context goes again with the next one. (Idle: `ask` failed
+            // before the request went out.)
+            State::Idle | State::Waiting => {
                 if matches!(self.turns.last(), Some(Turn::User(_))) {
                     self.turns.pop();
                     self.last_context.clear();
@@ -248,13 +300,45 @@ impl Agent {
             State::Calls(q, mut results) => {
                 // Every call the model made gets a result, or the next request is malformed.
                 for c in q {
-                    results.push(ToolResult { id: c.id, name: c.name, content: "Stopped by the user.".into(), error: true });
+                    results.push(ToolResult { id: c.id, name: c.name, content: queued.into(), error: true });
                 }
-                self.turns.push(Turn::Results(results));
+                if !results.is_empty() {
+                    self.turns.push(Turn::Results(results));
+                }
+            }
+        }
+        // Every call of the last reply needs a result too: a call that failed mid-run had already
+        // left the queue.
+        let reply = self.turns.iter().rposition(|t| matches!(t, Turn::Assistant { .. }));
+        if let Some(Turn::Assistant { calls, .. }) = reply.and_then(|i| self.turns.get(i)) {
+            let answered: Vec<&str> = reply
+                .and_then(|i| self.turns.get(i + 1..))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|t| if let Turn::Results(r) = t { Some(r) } else { None })
+                .flatten()
+                .map(|r| r.id.as_str())
+                .collect();
+            let missing: Vec<ToolResult> = calls
+                .iter()
+                .filter(|c| !answered.contains(&c.id.as_str()))
+                .map(|c| ToolResult { id: c.id.clone(), name: c.name.clone(), content: interrupted.into(), error: true })
+                .collect();
+            let order: Vec<String> = calls.iter().map(|c| c.id.clone()).collect();
+            if !missing.is_empty() {
+                match self.turns.last_mut() {
+                    Some(Turn::Results(r)) => r.extend(missing),
+                    _ => self.turns.push(Turn::Results(missing)),
+                }
+            }
+            // In the order of the calls: Gemini matches results to calls it sent without an id
+            // by their order.
+            if let Some(Turn::Results(r)) = self.turns.last_mut() {
+                r.sort_by_key(|x| order.iter().position(|id| *id == x.id).unwrap_or(usize::MAX));
             }
         }
         self.generation += 1;
-        self.transcript.push(Entry::Note("Stopped.".into()));
+        self.transcript.push(why);
     }
 
     /// The conversation so far, for tests and diagnostics.
