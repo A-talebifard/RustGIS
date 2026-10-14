@@ -779,6 +779,9 @@ pub struct GpForm {
     pub values: HashMap<&'static str, String>,
     pub search: String,
     pub last: Option<(bool, Vec<String>)>,
+    /// The fields that can hold coordinates, for the project revision and the input they were
+    /// read from (telling them reads rows, too much to do every frame).
+    pub coordinate_fields: Option<(u64, String, Vec<String>)>,
     /// A GeoLibre runner install in progress (it runs on a background thread).
     pub install: Option<std::sync::Arc<std::sync::Mutex<Install>>>,
     /// The browser's GeoLibre tools loading.
@@ -1201,18 +1204,40 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ParamKind::Layer => Some(layer_names(None)),
             ParamKind::PolygonLayer => Some(layer_names(Some(GeometryType::Polygon))),
             ParamKind::PointLayer => Some(layer_names(Some(GeometryType::Point))),
-            ParamKind::Field | ParamKind::NumericField => {
+            ParamKind::Field | ParamKind::NumericField | ParamKind::CoordinateField => {
                 let lname = first_layer.and_then(|n| app.gp.values.get(n)).cloned().unwrap_or_default();
-                let numeric = p.kind == ParamKind::NumericField;
                 let ds = app
                     .session
                     .map()
                     .layer_by_name(&lname)
                     .map(|l| &l.dataset)
                     .or_else(|| app.session.project.tables.iter().find(|t| t.name == lname).map(|t| &t.dataset));
-                let mut v: Vec<String> = ds
-                    .map(|d| d.fields.iter().filter(|f| !numeric || f.ty.is_numeric()).map(|f| f.name.clone()).collect())
-                    .unwrap_or_default();
+                let offered = |d: &rustgis_engine::data::Dataset, i: usize, f: &rustgis_engine::data::Field| match p.kind {
+                    ParamKind::NumericField => f.ty.is_numeric(),
+                    ParamKind::CoordinateField => rustgis_engine::analysis::holds_coordinates(d, i),
+                    _ => true,
+                };
+                let fields = |d: &rustgis_engine::data::Dataset| -> Vec<String> {
+                    d.fields.iter().enumerate().filter(|(i, f)| offered(d, *i, f)).map(|(_, f)| f.name.clone()).collect()
+                };
+                // Telling which fields hold coordinates reads their rows, too much for every frame:
+                // the list is kept until the project or the input changes.
+                let coordinates = p.kind == ParamKind::CoordinateField;
+                let kept = match &app.gp.coordinate_fields {
+                    Some((rev, input, kept)) if coordinates && *rev == app.session.revision && *input == lname => Some(kept.clone()),
+                    _ => None,
+                };
+                let mut v: Vec<String> = match (ds, kept) {
+                    (None, _) => Vec::new(),
+                    (Some(_), Some(kept)) => kept,
+                    (Some(d), None) => {
+                        let v = fields(d);
+                        if coordinates {
+                            app.gp.coordinate_fields = Some((app.session.revision, lname.clone(), v.clone()));
+                        }
+                        v
+                    }
+                };
                 // A field picked for another layer, which this one doesn't have: unset.
                 if ds.is_some() && !cur.is_empty() && !v.iter().any(|f| f.eq_ignore_ascii_case(&cur)) {
                     app.gp.values.remove(p.name);
