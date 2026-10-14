@@ -658,7 +658,7 @@ impl RustGisApp {
         }
         if lower.ends_with(".rgispkg") {
             let text = rustgis_engine::cmd::items::package_text(bytes)?;
-            let r = self.run("project.openText", json!({"text": text, "name": name}));
+            let r = self.run("project.openText", json!({"text": text}));
             self.map.invalidate();
             return r;
         }
@@ -702,7 +702,7 @@ impl RustGisApp {
             return Err(e);
         };
         if rustgis_engine::project::is_project_file(name) {
-            let r = self.run("project.openText", json!({"text": text, "name": name}));
+            let r = self.run("project.openText", json!({"text": text}));
             self.map.invalidate();
             r
         } else {
