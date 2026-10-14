@@ -213,6 +213,8 @@ pub struct Session {
     notices_given: u64,
     /// Layer whose attribute table is open.
     pub table_layer: Option<u32>,
+    /// The standalone table shown in the attribute table instead of a layer, by its id.
+    pub table_standalone: Option<u32>,
     /// Edits per layer id since the project was last saved (Edit › Status). A failed command's
     /// are rolled back; undo doesn't subtract them, since they count edits made, not the net change.
     pub edit_counts: std::collections::HashMap<u32, cmd::design::EditCounts>,
@@ -335,6 +337,7 @@ impl Session {
             notices: Vec::new(),
             notices_given: 0,
             table_layer: None,
+            table_standalone: None,
             clipboard: None,
             keep_tool: false,
             active_layout: None,
@@ -557,6 +560,7 @@ impl Session {
     pub(crate) fn undo(&mut self) -> bool {
         let Some((p, label)) = self.undo.pop() else { return false };
         let cur = std::mem::replace(&mut self.project, p);
+        self.project.keep_table_ids(&cur);
         self.redo.push((cur, label));
         self.touch_all_geometry();
         true
@@ -565,6 +569,7 @@ impl Session {
     pub(crate) fn redo(&mut self) -> bool {
         let Some((p, label)) = self.redo.pop() else { return false };
         let cur = std::mem::replace(&mut self.project, p);
+        self.project.keep_table_ids(&cur);
         self.undo.push((cur, label));
         self.touch_all_geometry();
         true
@@ -683,6 +688,9 @@ impl Session {
         {
             self.table_layer = None;
         }
+        if self.table_standalone.is_some_and(|id| self.project.table(id).is_none()) {
+            self.table_standalone = None;
+        }
     }
 
     /// Resolves a `layer` parameter (name or id), defaulting to the active layer.
@@ -702,6 +710,20 @@ impl Session {
             _ => {
                 self.active_layer.filter(|id| map.layer(*id).is_some()).ok_or_else(|| "select a layer in the Layers pane first".to_string())
             }
+        }
+    }
+
+    /// Resolves a `table` parameter to a standalone table's position in the project: by its id,
+    /// or by text as [`project::find_table`] reads it (a name, else an id).
+    pub fn table_index(&self, p: &Value) -> Result<usize, String> {
+        let tables = &self.project.tables;
+        match p.get("table") {
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .and_then(|id| tables.iter().position(|t| u64::from(t.id) == id))
+                .ok_or_else(|| format!("no standalone table with id {n}")),
+            Some(Value::String(s)) => project::find_table(tables, s).ok_or_else(|| format!("no standalone table named '{s}'")),
+            _ => Err("give the table's name or id (\"table\")".to_string()),
         }
     }
 
