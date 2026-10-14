@@ -87,7 +87,7 @@ pub fn commands() -> Vec<C> {
             .when(need_feature_layer)
             .params(r#"{"layer"?, "type": "single"|"unique"|"graduated"|"proportional", "field"?, "classes"?: 1..12, "method"?: "naturalBreaks"|"equalInterval"|"quantile", "ramp"?: string}"#),
         C::new("layer.ramp", "Color Scheme", "Style › Drawing", |s, p| {
-            let r = Ramp::from_name(s_req(p, "ramp")?).ok_or("unknown colour scheme")?;
+            let r = s.ramp(s_req(p, "ramp")?)?;
             with(s, p, |l| match &mut l.raster {
                 Some(rl) => rl.style.set_ramp(r),
                 None => {
@@ -1669,7 +1669,17 @@ fn move_to(s: &mut Session, p: &Value) -> CmdResult {
 fn symbology(s: &mut Session, p: &Value) -> CmdResult {
     let id = s.layer_id(p)?;
     let kind = ps(p, "type").unwrap_or("single").to_ascii_lowercase();
-    let ramp = ps(p, "ramp").and_then(Ramp::from_name);
+    // The layer's own ramp: kept when no other is named and the type stays, and found by name even
+    // after a custom ramp has been deleted from the project.
+    let current = s.map().layer(id).and_then(|l| match (&l.renderer, kind.as_str()) {
+        (Renderer::Graduated { ramp, .. }, "graduated" | "graduatedcolors")
+        | (Renderer::Unique { ramp, .. }, "unique" | "uniquevalues") => Some(ramp.clone()),
+        _ => None,
+    });
+    let ramp = match ps(p, "ramp") {
+        Some(n) => Some(s.ramp(n).or_else(|e| current.filter(|r| r.name().eq_ignore_ascii_case(n.trim())).ok_or(e))?),
+        None => current,
+    };
     let method = ps(p, "method").and_then(ClassMethod::from_name).unwrap_or_default();
     let classes = f(p, "classes").map(|c| c.clamp(1.0, 12.0) as usize).unwrap_or(5);
     let l = s.map().layer(id).ok_or("no such layer")?;
