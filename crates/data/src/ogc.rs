@@ -592,13 +592,14 @@ fn arcgis_mercator_cache(v: &serde_json::Value) -> bool {
 fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
     let b = base(url).trim_end_matches('/').to_string();
     let lower = b.to_ascii_lowercase();
-    let title = ["mapName", "name", "serviceDescription"]
+    // A name, never the service's description (often a paragraph of HTML). "Layers" and "Map"
+    // are ArcGIS's defaults, which say nothing: the service's own name in the address does.
+    let title = ["/mapName", "/name", "/documentInfo/Title"]
         .iter()
-        // "Layers" is ArcGIS's default map name, which says nothing.
-        .find_map(|k| v.get(*k).and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty() && *t != "Layers"))
-        .or_else(|| v.pointer("/documentInfo/Title").and_then(|t| t.as_str()).filter(|t| !t.is_empty()))
-        .map(|t| t.chars().take(200).collect())
-        .unwrap_or_else(|| b.rsplit('/').nth(1).unwrap_or("ArcGIS").to_string());
+        .filter_map(|k| v.pointer(k).and_then(|t| t.as_str()).map(str::trim))
+        .find(|t| !t.is_empty() && !["Layers", "Map"].contains(t) && !t.contains(['<', '\n']) && t.chars().count() <= 200)
+        .unwrap_or_else(|| b.rsplit('/').nth(1).filter(|n| !n.is_empty()).unwrap_or("ArcGIS"))
+        .to_string();
     let full = v.get("fullExtent").or_else(|| v.get("extent")).and_then(arcgis_extent);
     let mut service = Service { kind: "ArcGIS".into(), title: title.clone(), ..Service::default() };
     // A directory of services: say which to open.
@@ -610,8 +611,20 @@ fn arcgis(url: &str, v: &serde_json::Value) -> Result<Service, String> {
             .unwrap_or_default();
         return Err(format!("an ArcGIS services directory: open one of its services ({})", names.join(", ")));
     }
-    // Feature layers (FeatureServer, and a MapServer's layers): queried as GeoJSON.
+    // Feature layers (FeatureServer, and a MapServer's layers): queried as GeoJSON, so only from a
+    // service that allows queries: "Query", or "Data" on a MapServer (a cached basemap's
+    // capabilities are often just "Map,Tilemap").
     let features = |service: &mut Service| {
+        let queries = v
+            .get("capabilities")
+            .and_then(|c| c.as_str())
+            .is_none_or(|c| c.split(',').any(|k| ["query", "data"].iter().any(|q| k.trim().eq_ignore_ascii_case(q))));
+        if !queries {
+            if v.get("layers").and_then(|l| l.as_array()).is_some_and(|a| !a.is_empty()) {
+                service.notes.push("the service doesn't allow queries, so its layers' features can't be read".into());
+            }
+            return;
+        }
         for l in v.get("layers").and_then(|l| l.as_array()).into_iter().flatten().take(MAX_LAYERS) {
             let (Some(id), Some(name)) = (l.get("id").and_then(|i| i.as_i64()), l.get("name").and_then(|n| n.as_str())) else { continue };
             // Group layers have sub-layers and no features of their own.
@@ -1069,6 +1082,35 @@ pub fn fix_axes(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// #167: World_Street_Map's map is named "Layers" and titled "Map", and its description is
+    /// HTML: the service is named from its address, never from the description.
+    #[test]
+    fn arcgis_title_is_a_name_not_the_description() {
+        let street = r#"{"currentVersion": 11.5, "mapName": "Layers",
+            "serviceDescription": "<div style='text-align:Left'><p><span>This worldwide street map presents highway-level data.</span></p></div>",
+            "documentInfo": {"Title": "Map", "Comments": "<DIV>This worldwide street map</DIV>"},
+            "layers": [{"id": 0, "name": "World Street Map"}]}"#;
+        let s = parse("https://services.arcgisonline.com/arcgis/rest/services/World_Street_Map/MapServer", street.as_bytes()).unwrap();
+        assert_eq!(s.title, "World_Street_Map");
+        assert_eq!(s.layers[0].title, "World_Street_Map (map)");
+        assert_eq!(s.layers[1].title, "World Street Map");
+        // Its capabilities are "Map,Tilemap": no queries, so only the map is offered.
+        let cached = street.replace(r#""mapName""#, r#""capabilities": "Map,Tilemap", "mapName""#);
+        let s = parse("https://services.arcgisonline.com/arcgis/rest/services/World_Street_Map/MapServer", cached.as_bytes()).unwrap();
+        assert_eq!(s.layers.len(), 1);
+        assert!(matches!(&s.layers[0].offer, Offer::Tiles { .. }));
+        assert!(s.notes.iter().any(|n| n.contains("doesn't allow queries")), "{:?}", s.notes);
+        let queried = street.replace(r#""mapName""#, r#""capabilities": "Map,Query,Data", "mapName""#);
+        assert_eq!(parse("https://x.org/arcgis/rest/services/S/MapServer", queried.as_bytes()).unwrap().layers.len(), 2);
+        let data = street.replace(r#""mapName""#, r#""capabilities": "Map,Data", "mapName""#);
+        assert_eq!(parse("https://x.org/arcgis/rest/services/S/MapServer", data.as_bytes()).unwrap().layers.len(), 2);
+        // A title of its own is kept; one that is HTML is not.
+        let titled = r#"{"mapName": "Layers", "documentInfo": {"Title": "Street Map"}, "layers": []}"#;
+        assert_eq!(parse("https://x.org/arcgis/rest/services/S/MapServer", titled.as_bytes()).unwrap().title, "Street Map");
+        let html = r#"{"name": "<b>Parcels</b>", "serviceDescription": "Parcels", "layers": []}"#;
+        assert_eq!(parse("https://x.org/arcgis/rest/services/Folder/P/FeatureServer", html.as_bytes()).unwrap().title, "P");
+    }
+
     #[test]
     fn arcgis_services() {
         assert_eq!(
@@ -1089,6 +1131,7 @@ mod tests {
         let tiled = r#"{"currentVersion": 10.9, "mapName": "World", "singleFusedMapCache": true,
             "tileInfo": {"rows": 256, "spatialReference": {"wkid": 102100}, "lods": [{"level": 0, "resolution": 156543.03392800014}]}, "layers": []}"#;
         let s = parse("https://x.org/arcgis/rest/services/World/MapServer?f=json", tiled.as_bytes()).unwrap();
+        assert_eq!(s.title, "World");
         assert!(
             matches!(&s.layers[0].offer, Offer::Tiles { template } if template == "https://x.org/arcgis/rest/services/World/MapServer/tile/{z}/{y}/{x}")
         );
