@@ -777,11 +777,15 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
 pub struct GpForm {
     pub tool: Option<&'static str>,
     pub values: HashMap<&'static str, String>,
+    /// The standalone table picked for an input, by its id (names can repeat); the input's value
+    /// is then the table's name, for show.
+    pub tables: HashMap<&'static str, u32>,
     pub search: String,
     pub last: Option<(bool, Vec<String>)>,
-    /// The fields that can hold coordinates, for the project revision and the input they were
-    /// read from (telling them reads rows, too much to do every frame).
-    pub coordinate_fields: Option<(u64, String, Vec<String>)>,
+    /// The fields that can hold coordinates, for the project revision and the input (its name,
+    /// and its id for a table) they were read from: telling them reads rows, too much to do
+    /// every frame.
+    pub coordinate_fields: Option<((u64, String, Option<u32>), Vec<String>)>,
     /// A GeoLibre runner install in progress (it runs on a background thread).
     pub install: Option<std::sync::Arc<std::sync::Mutex<Install>>>,
     /// The browser's GeoLibre tools loading.
@@ -856,6 +860,7 @@ impl GpForm {
     pub fn open(&mut self, tool: Option<&'static str>, s: &Session) {
         self.tool = tool;
         self.values.clear();
+        self.tables.clear();
         self.last = None;
         let Some(spec) = tool.and_then(rustgis_engine::analysis::tool) else { return };
         let active = s.active_layer.and_then(|id| s.map().layer(id));
@@ -1178,13 +1183,10 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(4.0);
+    // A standalone table is picked by its id, since names can repeat, and shown by its name.
+    let tables: Vec<(u32, String)> = app.session.project.tables.iter().map(|t| (t.id, t.name.clone())).collect();
     let layer_names = |filter: Option<GeometryType>| -> Vec<String> {
-        let mut v: Vec<String> =
-            app.session.map().layers.iter().filter(|l| filter.is_none_or(|g| l.geometry_type() == g)).map(|l| l.name.clone()).collect();
-        if filter.is_none() {
-            v.extend(app.session.project.tables.iter().map(|t| t.name.clone()));
-        }
-        v
+        app.session.map().layers.iter().filter(|l| filter.is_none_or(|g| l.geometry_type() == g)).map(|l| l.name.clone()).collect()
     };
     let kind_names = |raster: bool| -> Vec<String> {
         app.session.map().layers.iter().filter(|l| l.is_raster() == raster).map(|l| l.name.clone()).collect()
@@ -1201,17 +1203,41 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         }
         let mut cur = app.gp.values.get(p.name).cloned().unwrap_or_default();
         let options: Option<Vec<String>> = match p.kind {
-            ParamKind::Layer => Some(layer_names(None)),
+            // Layers by their names, then tables: the value is the name shown, and a table
+            // picked is kept by its id beside it.
+            ParamKind::Layer => {
+                let picked = app.gp.tables.get(p.name).copied();
+                let shown = if cur.is_empty() { "—" } else { cur.as_str() };
+                egui::ComboBox::from_id_salt(("gp", p.name)).selected_text(shown).width(ui.available_width() - 4.0).show_ui(ui, |ui| {
+                    for name in layer_names(None) {
+                        if ui.selectable_label(picked.is_none() && name == cur, &name).clicked() {
+                            app.gp.values.insert(p.name, name);
+                            app.gp.tables.remove(p.name);
+                        }
+                    }
+                    for (id, name) in &tables {
+                        if ui.selectable_label(picked == Some(*id), name).clicked() {
+                            app.gp.values.insert(p.name, name.clone());
+                            app.gp.tables.insert(p.name, *id);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                continue;
+            }
             ParamKind::PolygonLayer => Some(layer_names(Some(GeometryType::Polygon))),
             ParamKind::PointLayer => Some(layer_names(Some(GeometryType::Point))),
             ParamKind::Field | ParamKind::NumericField | ParamKind::CoordinateField => {
                 let lname = first_layer.and_then(|n| app.gp.values.get(n)).cloned().unwrap_or_default();
-                let ds = app
-                    .session
-                    .map()
-                    .layer_by_name(&lname)
-                    .map(|l| &l.dataset)
-                    .or_else(|| app.session.project.tables.iter().find(|t| t.name == lname).map(|t| &t.dataset));
+                let table = first_layer.and_then(|n| app.gp.tables.get(n)).copied();
+                // The table picked; else the layer or table of that name, as the tool finds it.
+                let ds = match table {
+                    Some(id) => app.session.project.table(id).map(|t| &t.dataset),
+                    None => app.session.map().layer_by_name(&lname).map(|l| &l.dataset).or_else(|| {
+                        let tables = &app.session.project.tables;
+                        rustgis_engine::project::find_table(tables, &lname).and_then(|i| tables.get(i)).map(|t| &t.dataset)
+                    }),
+                };
                 let offered = |d: &rustgis_engine::data::Dataset, i: usize, f: &rustgis_engine::data::Field| match p.kind {
                     ParamKind::NumericField => f.ty.is_numeric(),
                     ParamKind::CoordinateField => rustgis_engine::analysis::holds_coordinates(d, i),
@@ -1223,8 +1249,9 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 // Telling which fields hold coordinates reads their rows, too much for every frame:
                 // the list is kept until the project or the input changes.
                 let coordinates = p.kind == ParamKind::CoordinateField;
+                let key = (app.session.revision, lname, table);
                 let kept = match &app.gp.coordinate_fields {
-                    Some((rev, input, kept)) if coordinates && *rev == app.session.revision && *input == lname => Some(kept.clone()),
+                    Some((of, kept)) if coordinates && *of == key => Some(kept.clone()),
                     _ => None,
                 };
                 let mut v: Vec<String> = match (ds, kept) {
@@ -1233,7 +1260,7 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     (Some(d), None) => {
                         let v = fields(d);
                         if coordinates {
-                            app.gp.coordinate_fields = Some((app.session.revision, lname.clone(), v.clone()));
+                            app.gp.coordinate_fields = Some((key, v.clone()));
                         }
                         v
                     }
@@ -1308,11 +1335,25 @@ fn geoprocessing(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // One browser run at a time.
         if crate::widgets::primary_button(ui, tl!("Run"), app.gp.web_run.is_none(), vec2(96.0, 30.0)).clicked() {
             let mut params = serde_json::Map::new();
+            // The tools of a suite or a plugin read their inputs as text; a plugin's is handed
+            // every parameter, so it gets only those it declares.
+            let builtin = rustgis_engine::analysis::external_source(spec).is_none();
+            let plugin = spec.id.starts_with(rustgis_engine::plugins::PREFIX);
             for p in spec.params {
                 if let Some(v) = app.gp.values.get(p.name).filter(|v| !v.trim().is_empty()) {
-                    let val = match p.kind {
-                        ParamKind::Number => v.trim().parse::<f64>().map(|n| json!(n)).unwrap_or(json!(v)),
-                        ParamKind::Bool => json!(v == "true"),
+                    let val = match (p.kind, app.gp.tables.get(p.name)) {
+                        // A table goes by its id: a number, which no name is taken for. Its name
+                        // goes beside it (`input_name`) for whoever reads the run afterwards; the
+                        // tools read only the parameters they know.
+                        (ParamKind::Layer, Some(id)) => {
+                            let note = format!("{}_name", p.name);
+                            if !plugin && !spec.params.iter().any(|q| q.name == note) {
+                                params.insert(note, json!(v));
+                            }
+                            if builtin { json!(id) } else { json!(id.to_string()) }
+                        }
+                        (ParamKind::Number, _) => v.trim().parse::<f64>().map(|n| json!(n)).unwrap_or(json!(v)),
+                        (ParamKind::Bool, _) => json!(v == "true"),
                         _ => json!(v),
                     };
                     params.insert(p.name.to_string(), val);
