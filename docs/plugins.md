@@ -246,6 +246,12 @@ Inside a request, `host::call(op, params)` sends one of these to RustGIS:
 | `map.addTiles` `{url, kind?, name?, attribution?, maxZoom?, overlay?, replace?}` | adds a web tile layer (`edit` and `network`) |
 | any command id (`layer.zoomTo`, `select.byAttributes`, `layer.symbology`…) | what the command returns, within the plugin's permissions |
 
+In the web app a command can't wait for a download, so where `layer.addUrl` has to download a
+file whole it answers `{"pending": true, "url": …}` there: RustGIS downloads the data off the
+frame and adds the layer when it lands, as **Home › Add Data › From URL** does. A PMTiles
+archive, a cloud-optimised GeoTIFF or a FlatGeobuf or GeoParquet read in place is added at once,
+as elsewhere.
+
 `rustgis-cli commands` lists every command id and its parameters.
 
 Tools work differently. A tool receives its layer parameters' features as GeoJSON (only the

@@ -3250,6 +3250,79 @@ fn data_from_a_web_address() {
     assert_eq!(crate::cmd::layer::url_file_name("https://x.org/q.json", b"[]").unwrap(), "q.geojson");
 }
 
+/// Where a command may not download itself (the browser), `layer.addUrl` leaves its request for
+/// the front end: once per address, a few at a time (the next is refused, never one silently
+/// dropped after it was promised), and taken once.
+#[test]
+fn url_requests_wait_for_the_front_end() {
+    let mut s = Session::new(Project::default());
+    let p = json!({"url": "https://x.org/a.geojson", "name": "A", "zoom": true});
+    assert_eq!(s.request_url(&p), Ok(json!({"pending": true, "url": "https://x.org/a.geojson"})));
+    assert!(s.request_url(&p).is_ok());
+    assert!(s.request_url(&json!({"url": "https://x.org/b.geojson"})).is_ok());
+    let taken = s.take_url_requests();
+    assert_eq!(taken.len(), 2, "the same address once");
+    assert_eq!((taken[0]["name"].as_str(), taken[0]["zoom"].as_bool()), (Some("A"), Some(true)));
+    assert_eq!(taken[1]["url"], "https://x.org/b.geojson");
+    assert!(s.take_url_requests().is_empty());
+    for i in 0..16 {
+        assert!(s.request_url(&json!({"url": format!("https://x.org/{i}")})).is_ok(), "{i}");
+    }
+    let refused = s.request_url(&json!({"url": "https://x.org/16"})).unwrap_err();
+    assert!(refused.contains("16 downloads are already waiting"), "{refused}");
+    assert!(s.request_url(&json!({"url": "https://x.org/3"})).is_ok(), "one already waiting is fine");
+    let taken = s.take_url_requests();
+    assert_eq!(taken.len(), 16, "a few at a time");
+    assert_eq!((taken[0]["url"].as_str(), taken[15]["url"].as_str()), (Some("https://x.org/0"), Some("https://x.org/15")));
+    assert!(s.request_url(&json!({"url": "https://x.org/16"})).is_ok(), "room again once taken");
+}
+
+/// A mutating command that only left a request for the front end (the browser's `layer.addUrl`)
+/// leaves no undo step and nothing to save; one that changed the project still does, and so
+/// does one that merely answers "pending" (a plugin's command can't claim it changed nothing).
+#[test]
+fn a_pending_answer_is_no_undo_step() {
+    let mut s = Session::new(Project::default());
+    let undo = s.undo.len();
+    let p = json!({"url": "https://x.org/a.geojson"});
+    let r = s.guarded("Add Data From URL", true, |s| s.request_url(&p));
+    assert_eq!(r.unwrap()["pending"], true);
+    assert_eq!(s.undo.len(), undo);
+    assert!(!s.dirty);
+    assert_eq!(s.take_url_requests().len(), 1);
+    let r = s.guarded("Plugin Command", true, |_| Ok(json!({"pending": true})));
+    assert!(r.is_ok());
+    assert_eq!(s.undo.len(), undo + 1, "an answer alone doesn't skip the step");
+    assert!(s.dirty);
+    assert!(s.run("map.new", &json!({"name": "B"})).is_ok());
+    assert_eq!(s.undo.len(), undo + 2);
+    // A command that changed the project and then, through a command of its own, left a
+    // request (a plugin's) gets its step: the inner run takes the flag, the outer never sees it.
+    let r = s.guarded("Plugin Command", true, |s| {
+        s.run("map.new", &json!({"name": "C"}))?;
+        s.guarded("Add Data From URL", true, |s| s.request_url(&json!({"url": "https://x.org/c.geojson"})))
+    });
+    assert_eq!(r.unwrap()["pending"], true);
+    assert_eq!(s.undo.len(), undo + 4, "the map's step and the plugin's");
+    assert_eq!(s.take_url_requests().len(), 1);
+}
+
+/// A command that left a request for the front end and then failed takes the request back with
+/// its other changes: nothing is downloaded for a command that reported failure.
+#[test]
+fn a_failed_command_takes_its_request_back() {
+    let mut s = Session::new(Project::default());
+    assert!(s.request_url(&json!({"url": "https://x.org/kept.geojson"})).is_ok());
+    let r = s.guarded("Plugin Command", true, |s| {
+        s.guarded("Add Data From URL", true, |s| s.request_url(&json!({"url": "https://x.org/dropped.geojson"})))?;
+        Err("the plugin failed afterwards".to_string())
+    });
+    assert!(r.is_err());
+    let left = s.take_url_requests();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0]["url"], "https://x.org/kept.geojson");
+}
+
 /// The app's downloads land in the project they were started for, as bytes (no base64); one
 /// whose project was closed meanwhile is dropped.
 #[test]
