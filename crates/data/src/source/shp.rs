@@ -424,12 +424,16 @@ fn value(c: &Column, b: &[u8]) -> Value {
             let t = text();
             if t.is_empty() { Value::Null } else { Value::Text(t) }
         }
-        b'N' | b'F' => match number() {
-            Some(v) if c.out == FieldType::Integer && v.fract() == 0.0 && v.abs() < 9.0e15 => Value::Int(v as i64),
-            Some(_) if c.out == FieldType::Integer => Value::Null,
-            Some(v) => Value::Float(v),
-            None => Value::Null,
+        // A whole-number column's values as integers, exactly (its at most 18 digits fit an i64);
+        // one written with a point or exponent (`12.0`, `1e3`) too, and one that isn't whole is
+        // kept as a number rather than lost.
+        b'N' | b'F' if c.out == FieldType::Integer => match std::str::from_utf8(trimmed(b)).ok().and_then(|t| t.parse::<i64>().ok()) {
+            Some(i) => Value::Int(i),
+            None => {
+                number().map_or(Value::Null, |v| if v.fract() == 0.0 && v.abs() < 9.0e15 { Value::Int(v as i64) } else { Value::Float(v) })
+            }
         },
+        b'N' | b'F' => number().map_or(Value::Null, Value::Float),
         b'I' => b.get(..4).and_then(|v| v.try_into().ok()).map_or(Value::Null, |v| Value::Int(i64::from(i32::from_le_bytes(v)))),
         // Currency as the `dbase` crate reads it (a Shapefile read whole): a little-endian f64.
         b'O' | b'Y' => {
