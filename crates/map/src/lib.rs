@@ -249,6 +249,15 @@ impl Layer {
                 return src.is_pending();
             }
         }
+        // A project that lists no fields for a streamed layer (one written by another app, which
+        // can't know which columns the reader takes) gets the source's: reads keep the attributes
+        // in that order, and a renderer on a field finds it.
+        if self.dataset.fields.is_empty()
+            && let Some(info) = self.source.as_ref().and_then(|s| s.info())
+        {
+            self.dataset.fields = info.fields.clone();
+        }
+        let Some(src) = &mut self.source else { return false };
         // A failed read leaves nothing drawn for it (its error shows in Layers), not the
         // previous view's features.
         match src.poll(block) {
@@ -310,7 +319,10 @@ impl Layer {
             return Err(format!("the layer has more features than the {max} read at once"));
         }
         ds.name = self.dataset.name.clone();
-        ds.fields = self.dataset.fields.clone();
+        // (A project that lists no fields keeps the source's, as `sync_source` gives it.)
+        if !self.dataset.fields.is_empty() {
+            ds.fields = self.dataset.fields.clone();
+        }
         ds.source = self.dataset.source.clone();
         Ok(ds)
     }
