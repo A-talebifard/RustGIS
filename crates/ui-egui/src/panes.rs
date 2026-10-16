@@ -230,16 +230,36 @@ pub fn patch(p: &egui::Painter, r: Rect, s: &Symbol, g: GeometryType) {
     }
 }
 
+/// Clears the Layers pane's filter (#300) when another map comes into view. Run every frame,
+/// whichever pane (if any) is open, so a map visited while Layers was hidden still counts.
+pub fn follow_active_map(app: &mut RustGisApp) {
+    let map = &app.session.map().name;
+    if app.ui.layer_filter_map != *map {
+        app.ui.layer_filter.clear();
+        app.ui.layer_filter_map.clone_from(map);
+    }
+}
+
 fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    // The name filter (#300), above the list so it stays in view.
+    let map_name = app.session.map().name.clone();
+    ui.add_space(8.0);
+    filter_box(app, ui, t);
+    let q = app.ui.layer_filter.trim().to_lowercase();
+    let filtering = !q.is_empty();
+    let shows = |name: &str| !filtering || name.to_lowercase().contains(&q);
     // Drawing order header.
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(12.0);
         ui.label(egui::RichText::new(tl!("Drawing Order")).size(11.5).color(t.text_dim));
+        // Rows dropped among hidden layers would land in unclear places.
+        if filtering {
+            ui.label(egui::RichText::new(tl!("Clear the filter to reorder")).size(11.0).color(t.text_disabled));
+        }
     });
     ui.add_space(2.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let map_name = app.session.map().name.clone();
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
@@ -248,25 +268,41 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         });
         let layers: Vec<Layer> = app.session.map().layers.clone();
         let scale = app.session.scale();
-        let blocks: Vec<(u32, Rect)> = layers.iter().map(|l| (l.id, layer_row(app, ui, l, scale, t))).collect();
-        layer_drop(app, ui, &blocks, t);
+        let blocks: Vec<(u32, Rect)> =
+            layers.iter().filter(|l| shows(&l.name)).map(|l| (l.id, layer_row(app, ui, l, scale, !filtering, t))).collect();
+        if !filtering {
+            layer_drop(app, ui, &blocks, t);
+        }
         // Web tile layers (services, tile addresses) draw over the basemap and under the layers.
         let tiles: Vec<TileLayer> = app.session.map().tiles.clone();
-        for (i, tile) in tiles.iter().enumerate() {
-            tile_row(app, ui, i, tiles.len(), tile, t);
+        let mut tiles_shown = 0;
+        for (i, tile) in tiles.iter().enumerate().filter(|(_, x)| shows(&x.name)) {
+            tile_row(app, ui, i, tiles.len(), !filtering, tile, t);
+            tiles_shown += 1;
         }
-        // The basemap row at the bottom, like a desktop GIS.
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.add_space(30.0);
-            let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-            icons::paint(ui.painter(), r, "basemap", t.icon, t.accent);
-            ui.label(
-                egui::RichText::new(format!("{} · {}", tl!("Basemap"), tl!(app.session.map().basemap.label())))
-                    .size(12.0)
-                    .color(t.text_dim),
-            );
-        });
+        let tables: Vec<(u32, String)> =
+            app.session.project.tables.iter().filter(|x| shows(&x.name)).map(|x| (x.id, x.name.clone())).collect();
+        // A map with no layers says so below instead.
+        if filtering && !layers.is_empty() && blocks.is_empty() && tiles_shown == 0 && tables.is_empty() {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(tl!("No layers match")).color(t.text_dim));
+            });
+        }
+        // The basemap row at the bottom, like a desktop GIS (not a layer, so not while filtering).
+        if !filtering {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(30.0);
+                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                icons::paint(ui.painter(), r, "basemap", t.icon, t.accent);
+                ui.label(
+                    egui::RichText::new(format!("{} · {}", tl!("Basemap"), tl!(app.session.map().basemap.label())))
+                        .size(12.0)
+                        .color(t.text_dim),
+                );
+            });
+        }
         if layers.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
@@ -279,8 +315,7 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 }
             });
         }
-        // Standalone tables.
-        let tables: Vec<(u32, String)> = app.session.project.tables.iter().map(|t| (t.id, t.name.clone())).collect();
+        // Standalone tables (those the filter keeps).
         if !tables.is_empty() {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -317,6 +352,42 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             }
         }
     });
+}
+
+/// The Layers pane's filter box, laid out like Command Search's (`chrome::command_search`): the
+/// search icon, a frameless text box and, once it holds text, a ✕, over a separator.
+fn filter_box(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+        icons::paint(ui.painter(), r, "search", t.text_dim, t.accent);
+        let clear = !app.ui.layer_filter.is_empty();
+        // Room for the ✕ (22 px) and the pane's right margin.
+        let room = ui.available_width() - if clear { 22.0 + ui.spacing().item_spacing.x + 10.0 } else { 10.0 };
+        // The box keeps Escape (egui would drop its focus on it before the global shortcuts ran,
+        // which then take the key): Escape clears the text, and on an empty box lets go.
+        let keys = egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, escape: true, ..Default::default() };
+        let edit = egui::TextEdit::singleline(&mut app.ui.layer_filter).hint_text(tl!("Filter layers")).frame(egui::Frame::NONE);
+        let edit = ui.add(edit.desired_width(room).event_filter(keys));
+        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if app.ui.layer_filter.is_empty() {
+                edit.surrender_focus();
+            }
+            app.ui.layer_filter.clear();
+        }
+        if clear {
+            let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Clear")));
+            if resp.hovered() {
+                ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
+            }
+            icons::paint(ui.painter(), r.shrink(5.0), "close", t.text_dim, t.accent);
+            if resp.on_hover_text(tl!("Clear")).clicked() {
+                app.ui.layer_filter.clear();
+            }
+        }
+    });
+    ui.separator();
 }
 
 /// The layer a row drag carries (egui's drag-and-drop payload).
@@ -381,8 +452,9 @@ fn visibility_box(ui: &Ui, cb: Rect, visible: bool, t: &Tokens) {
 }
 
 /// A web tile layer's row (index `i` of `count`, top first as the map lists them): its checkbox
-/// shows or hides it; right-click sets its opacity, moves it up or down, or removes it.
-fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, tile: &TileLayer, t: &Tokens) {
+/// shows or hides it; right-click sets its opacity, moves it up or down (not with `reorder` off:
+/// the list is filtered), or removes it.
+fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: bool, tile: &TileLayer, t: &Tokens) {
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(r.shrink2(vec2(4.0, 1.0)), CornerRadius::same(5), t.hover);
@@ -415,11 +487,11 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, tile: &Ti
             }
         });
         ui.separator();
-        if ui.add_enabled(i > 0, egui::Button::new(tl!("Move up"))).clicked() {
+        if ui.add_enabled(reorder && i > 0, egui::Button::new(tl!("Move up"))).clicked() {
             action = Some(("map.setTiles", json!({"index": i, "move": "up"})));
             ui.close();
         }
-        if ui.add_enabled(i + 1 < count, egui::Button::new(tl!("Move down"))).clicked() {
+        if ui.add_enabled(reorder && i + 1 < count, egui::Button::new(tl!("Move down"))).clicked() {
             action = Some(("map.setTiles", json!({"index": i, "move": "down"})));
             ui.close();
         }
@@ -433,12 +505,14 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, tile: &Ti
     }
 }
 
-/// A layer's row and, expanded, its legend; returns the rectangle of both.
-fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, t: &Tokens) -> Rect {
+/// A layer's row and, expanded, its legend; returns the rectangle of both. With `reorder` off
+/// (the list is filtered) the row can't be dragged.
+fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: bool, t: &Tokens) -> Rect {
     let active = app.session.active_layer == Some(l.id);
     let row_h = 26.0;
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
-    if resp.drag_started_by(egui::PointerButton::Primary) {
+    let sense = if reorder { Sense::click_and_drag() } else { Sense::click() };
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), sense);
+    if reorder && resp.drag_started_by(egui::PointerButton::Primary) {
         egui::DragAndDrop::set_payload(ui.ctx(), DraggedLayer(l.id));
     }
     let dragging = egui::DragAndDrop::payload::<DraggedLayer>(ui.ctx()).is_some_and(|d| d.0 == l.id);
@@ -590,11 +664,12 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, t: &Token
             ui.close();
         }
         ui.separator();
-        if ui.button(tl!("Move Up")).clicked() {
+        // Not while the list is filtered: the layer would move among hidden ones.
+        if ui.add_enabled(reorder, egui::Button::new(tl!("Move Up"))).clicked() {
             let _ = app.run("layer.moveUp", json!({"layer": l.id}));
             ui.close();
         }
-        if ui.button(tl!("Move Down")).clicked() {
+        if ui.add_enabled(reorder, egui::Button::new(tl!("Move Down"))).clicked() {
             let _ = app.run("layer.moveDown", json!({"layer": l.id}));
             ui.close();
         }

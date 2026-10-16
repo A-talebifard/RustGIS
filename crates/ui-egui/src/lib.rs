@@ -281,6 +281,10 @@ pub struct UiState {
     pub titlebar: Option<TitlebarMetrics>,
     /// Saved pane arrangements: (name, left pane, right pane, tab).
     pub pane_sets: Vec<(String, Option<LeftPane>, Option<RightPane>, String)>,
+    /// The Layers pane's name filter (#300) and the map it was typed for: another map in view
+    /// starts unfiltered. Not saved.
+    pub layer_filter: String,
+    pub layer_filter_map: String,
     /// The command an item picked in the browser opens with (web).
     pub pending_open: Option<&'static str>,
     /// The file the project was last saved or opened as (web), which Save downloads again.
@@ -391,6 +395,8 @@ impl Default for UiState {
             quick_access: Vec::new(),
             titlebar: None,
             pane_sets: Vec::new(),
+            layer_filter: String::new(),
+            layer_filter_map: String::new(),
         }
     }
 }
@@ -2322,6 +2328,7 @@ impl RustGisApp {
         i18n::set_current(self.lang());
         let t = theme::Tokens::get(&ctx);
         chrome::shortcuts(self, &ctx);
+        panes::follow_active_map(self);
         if self.ui.backstage {
             backstage::show(self, ui);
         } else {
