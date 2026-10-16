@@ -910,6 +910,77 @@ fn mcp_hostile_messages_never_panic() {
     }
 }
 
+#[test]
+fn cut_replies_never_run_their_calls() {
+    // Chat Completions cut at the length limit, with a (possibly partial) call.
+    let mut s = sample();
+    let before = s.map().center_lonlat();
+    let mut a = Agent::new(cfg("openai"), &s);
+    assert!(matches!(a.ask("Zoom to Paris", &s), Step::Send(_)));
+    let cut = json!({"choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": "Zooming",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "run_command",
+            "arguments": json!({"command": "map.goToXY", "params": {"lon": 2.35, "lat": 48.85, "scale": 5000000}}).to_string()}}]}}]});
+    assert_eq!(a.receive(a.generation(), ok(cut), &mut s), Step::Done);
+    assert_eq!(s.map().center_lonlat(), before, "nothing ran");
+    assert!(!a.transcript.iter().any(|e| matches!(e, Entry::Tool { .. })));
+    // The next request pairs the call with a "not run" result, as every wire format requires.
+    let Step::Send(next) = a.ask("go on", &s) else { panic!("expected a request") };
+    let messages = body(&next)["messages"].as_array().cloned().unwrap_or_default();
+    let result = messages.iter().find(|m| m["role"] == "tool").cloned().unwrap_or_default();
+    assert_eq!(result["tool_call_id"], "c1");
+    assert!(result["content"].as_str().is_some_and(|c| c.contains("Not run")));
+
+    // Anthropic: the "not run" result and the next question share one user message.
+    let mut a = Agent::new(cfg("anthropic"), &s);
+    assert!(matches!(a.ask("Zoom to Paris", &s), Step::Send(_)));
+    let cut = json!({"stop_reason": "max_tokens", "content": [{"type": "text", "text": "Zooming"},
+        {"type": "tool_use", "id": "t1", "name": "run_command", "input": {"command": "map.goToXY", "params": {"lon": 2.35, "lat": 48.85}}}]});
+    assert_eq!(a.receive(a.generation(), ok(cut), &mut s), Step::Done);
+    assert_eq!(s.map().center_lonlat(), before, "nothing ran");
+    let Step::Send(next) = a.ask("go on", &s) else { panic!("expected a request") };
+    let messages = body(&next)["messages"].as_array().cloned().unwrap_or_default();
+    let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+    assert_eq!(roles, ["user", "assistant", "user"], "roles alternate");
+    let last = messages.last().cloned().unwrap_or_default();
+    assert_eq!(last["content"][0]["type"], "tool_result");
+    assert_eq!(last["content"][0]["tool_use_id"], "t1");
+    assert_eq!(last["content"][1]["text"], "go on");
+
+    // Gemini: the call is answered by a function response before the next question.
+    let mut a = Agent::new(cfg("gemini"), &s);
+    assert!(matches!(a.ask("Zoom to Paris", &s), Step::Send(_)));
+    let cut = json!({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"role": "model", "parts": [{"text": "Zooming"},
+        {"functionCall": {"name": "run_command", "args": {"command": "map.goToXY", "params": {"lon": 2.35, "lat": 48.85}}}}]}}]});
+    assert_eq!(a.receive(a.generation(), ok(cut), &mut s), Step::Done);
+    assert_eq!(s.map().center_lonlat(), before, "nothing ran");
+    let Step::Send(next) = a.ask("go on", &s) else { panic!("expected a request") };
+    let contents = body(&next)["contents"].as_array().cloned().unwrap_or_default();
+    let response = contents.iter().position(|c| c["parts"][0].get("functionResponse").is_some());
+    assert_eq!(response, Some(2), "the result follows the model's call");
+    assert_eq!(contents.get(2).map(|c| c["parts"][0]["functionResponse"]["name"].clone()), Some(json!("run_command")));
+    assert_eq!(contents.last().map(|c| c["parts"][0]["text"].clone()), Some(json!("go on")));
+}
+
+#[test]
+fn docs_tools_are_the_assistants_too() {
+    let names: Vec<&str> = tools::defs().iter().map(|d| d.name).collect();
+    assert!(names.contains(&"search_docs") && names.contains(&"read_doc"));
+    let mut s = sample();
+    let call = |name: &str, args: Value| ToolCall { id: "d".into(), name: name.into(), args };
+    let found = tools::run(&mut s, &call("search_docs", json!({"query": "basemap", "limit": 3}))).unwrap();
+    assert!(found.contains("basemap") || found.contains("Basemap"), "{found}");
+    assert!(tools::run(&mut s, &call("read_doc", json!({"page": "cli.md"}))).unwrap().contains("rustgis-cli"));
+    assert!(tools::run(&mut s, &call("read_doc", json!({"page": "nope.md"}))).is_err());
+    // Pages aren't cut again at the usual result length: every one comes back as whole JSON, as the
+    // MCP server served them.
+    let long = tools::run(&mut s, &call("read_doc", json!({"page": "user-guide/data.md"}))).unwrap();
+    assert!(long.chars().count() > tools::MAX_RESULT);
+    for p in crate::docs::PAGES {
+        let page = tools::run(&mut s, &call("read_doc", json!({"page": p.path}))).unwrap();
+        assert!(serde_json::from_str::<Value>(&page).is_ok_and(|v| v["page"] == p.path), "{}", p.path);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Signing in with ChatGPT: the Responses wire format and the credentials
 
