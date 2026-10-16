@@ -67,7 +67,20 @@ pub struct MapView {
     texture: Option<egui::TextureHandle>,
     key: Option<Key>,
     tex_camera: Camera,
+    /// The size (points) of the view the texture was drawn for: larger than the map while it
+    /// moves, so zooming out and panning have more of it to show.
+    tex_size: (f64, f64),
+    /// Where the texture sits on screen this frame.
+    tex_rect: Rect,
+    /// How long the last frame drawn mid-motion took (ms), and the share of full resolution it
+    /// was drawn at: the next is spaced out by it, and drawn finer or coarser to take about 40 ms.
+    motion_cost: (f64, f64),
     labels: Vec<PlacedLabel>,
+    /// On the globe, where each label stands on the Earth, so it follows the globe as it turns
+    /// and zooms until the next frame places them again.
+    label_lonlat: Vec<Option<Coord>>,
+    /// The camera the labels were placed for.
+    label_camera: Camera,
     last_interaction: f64,
     drag: Option<(Pos2, DragKind)>,
     sketch: Vec<Coord>,
@@ -133,7 +146,12 @@ impl Default for MapView {
             texture: None,
             key: None,
             tex_camera: Camera::world(),
+            tex_size: (0.0, 0.0),
+            tex_rect: Rect::NOTHING,
+            motion_cost: (0.0, 1.0),
             labels: Vec::new(),
+            label_lonlat: Vec::new(),
+            label_camera: Camera::world(),
             last_interaction: -10.0,
             drag: None,
             sketch: Vec::new(),
@@ -458,9 +476,38 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         fast_engaged = true;
     }
     let stale = app.map.key != Some(key);
+    // While the flat map moves on the CPU its last frame is shifted and scaled, until that no
+    // longer covers the view (zooming out, panning past its edge) or stretches it blurry
+    // (zooming in). Then a frame is drawn mid-motion: for a gap, over twice the width and height,
+    // so the next steps are covered too (as MapLibre keeps showing the tiles around the view);
+    // when stretched, at the view. Frames are drawn coarser while they're slow, and sharpening
+    // ones spaced out by how long the last took, so the motion between them stays smooth.
+    let motion = (stale && interacting && !gpu_ok && !globe_view && app.map.texture.is_some())
+        .then(|| {
+            let r = tex_rect(app, cam, rect, false);
+            let stretch = r.width() as f64 / app.map.tex_size.0.max(1.0);
+            let (ms, k) = app.map.motion_cost;
+            let (vw, vh, most, least) = if !r.expand(0.5).contains_rect(rect) {
+                // A gap is filled at once: each such frame covers zooming out twice as far, so
+                // they can't come often.
+                (w * 2.0, h * 2.0, 0.5, 0.2)
+            } else if stretch > 1.3 && time - app.map.last_render >= motion_gap(ms) {
+                (w, h, 1.0, 0.4)
+            } else {
+                return None;
+            };
+            let k = if ms > 0.0 { k * (40.0 / ms).sqrt().clamp(0.7, 1.4) } else { 1.0 };
+            Some((vw, vh, ppp * (k * most).clamp(least, most) as f32))
+        })
+        .flatten();
+    let (vw, vh, vppp) = motion.unwrap_or((w, h, render_ppp));
     if stale
         && !fast_engaged
-        && (gpu_ok || !interacting || app.map.texture.is_none() || app.map.key.is_some_and(|k| k.rev != key.rev || k.size != key.size))
+        && (motion.is_some()
+            || gpu_ok
+            || !interacting
+            || app.map.texture.is_none()
+            || app.map.key.is_some_and(|k| k.rev != key.rev || k.size != key.size))
     {
         let t0 = web_time::Instant::now();
         let view = View { width: w, height: h, pixels_per_point: render_ppp as f64, camera: cam };
@@ -481,6 +528,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 app.map.gpu_frame = Some(std::sync::Arc::new(bufs));
                 app.map.labels = scene.labels;
                 app.map.labels.splice(0..0, scene.unplaced);
+                app.map.label_lonlat = Vec::new();
+                app.map.label_camera = cam;
                 app.map.attribution = scene.attribution;
                 app.map.last_render = time;
                 for e in scene.tile_errors {
@@ -489,6 +538,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 }
                 app.map.tex_camera = cam;
+                app.map.tex_size = (w, h);
                 app.map.key = Some(key);
                 rendered_gpu = true;
             }
@@ -498,6 +548,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         // no render state arrived yet.
         if !rendered_gpu {
             app.map.gpu_frame = None;
+            let view = View { width: vw, height: vh, pixels_per_point: vppp as f64, camera: cam };
             if let Some(r) = rustgis_engine::render::render(app.session.map_mut(), &view) {
                 let size = [r.pixmap.width() as usize, r.pixmap.height() as usize];
                 let img = egui::ColorImage::from_rgba_premultiplied(size, r.pixmap.data());
@@ -505,8 +556,20 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
                     None => app.map.texture = Some(ui.ctx().load_texture("map", img, egui::TextureOptions::LINEAR)),
                 }
-                app.map.labels = r.labels;
-                app.map.labels.splice(0..0, r.unplaced);
+                // A globe drawn roughly mid-motion keeps the last labels, which it would re-place
+                // differently every frame.
+                if !draft {
+                    app.map.labels = r.labels;
+                    app.map.labels.splice(0..0, r.unplaced);
+                    app.map.label_lonlat = match globe_view {
+                        true => {
+                            let g = Globe::new(&cam, w, h);
+                            app.map.labels.iter().map(|l| g.inverse(l.x as f64, l.y as f64)).collect()
+                        }
+                        false => Vec::new(),
+                    };
+                    app.map.label_camera = cam;
+                }
                 app.map.attribution = r.attribution;
                 app.map.last_render = time;
                 for e in r.tile_errors {
@@ -515,11 +578,17 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     }
                 }
                 app.map.tex_camera = cam;
-                app.map.key = Some(key);
+                app.map.tex_size = (vw, vh);
+                // Mid-motion the frame stands in for the real one, which follows once it settles.
+                app.map.key = Some(Key { draft: key.draft || motion.is_some(), ..key });
             }
         }
         app.map.render_ms = t0.elapsed().as_millis() as u64;
-        if app.map.camera_moved {
+        if let Some((_, _, p)) = motion {
+            let k = (p / ppp) as f64 / if vw > w { 0.5 } else { 1.0 };
+            app.map.motion_cost = (t0.elapsed().as_secs_f64() * 1000.0, k);
+            ui.ctx().request_repaint();
+        } else if app.map.camera_moved {
             app.session.record_extent();
             app.map.camera_moved = false;
         }
@@ -540,22 +609,8 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         painter.rect_filled(rect, 0.0, c32(basemap.palette().0));
     }
     let old = app.map.tex_camera;
-    let e0 = old.extent(w, h);
-    let to_screen = |c: &Camera, x: f64, y: f64| {
-        let (sx, sy) = c.to_screen(Coord::new(x, y), w, h);
-        pos2(rect.min.x + sx as f32, rect.min.y + sy as f32)
-    };
-    let tex_rect = if globe_view {
-        // Where the old frame's centre now is, at the new zoom.
-        let (old_g, new_g) = (Globe::new(&old, w, h), Globe::new(&cam, w, h));
-        let s = (new_g.radius() / old_g.radius()) as f32;
-        match new_g.forward(old.center_lonlat()) {
-            Some((x, y)) if s.is_finite() => Rect::from_center_size(pos2(rect.min.x + x as f32, rect.min.y + y as f32), rect.size() * s),
-            _ => rect,
-        }
-    } else {
-        Rect::from_min_max(to_screen(&cam, e0.min_x, e0.max_y), to_screen(&cam, e0.max_x, e0.min_y))
-    };
+    let tex_rect = tex_rect(app, cam, rect, globe_view);
+    app.map.tex_rect = tex_rect;
     // A fresh GPU frame (re-rendered whenever the key changed, so its camera is the current
     // one: tex_rect == rect and labels sit unshifted) draws inside egui's wgpu pass. The GPU
     // backend only serves flat maps, so the globe's drape never meets it.
@@ -577,19 +632,56 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     } else {
         app.map.comets.clear();
     }
-    // Labels (moved with the texture; hidden while zooming, and while the globe moves, where
-    // re-placing them every frame would make them flicker).
-    let zooming = (old.res / cam.res - 1.0).abs() > 0.002;
-    let hide_labels = zooming || (globe_view && moving);
-    if !hide_labels {
-        let dx = tex_rect.min.x - rect.min.x;
-        let dy = tex_rect.min.y - rect.min.y;
+    // Labels stay on screen while the map moves, at their own size, as MapLibre keeps them
+    // (rather than vanishing until it settles): on the flat map they move with the texture,
+    // spreading apart or closing up as it zooms; on the globe each follows its place on the
+    // Earth, and those turned behind the horizon drop out.
+    let placed = app.map.label_camera;
+    if globe_view && (placed.center != cam.center || placed.res != cam.res) {
+        let g = Globe::new(&cam, w, h);
+        for (l, c) in app.map.labels.iter().zip(&app.map.label_lonlat) {
+            if let Some((x, y)) = c.and_then(|c| g.forward(c)) {
+                draw_label(&painter, l, rect.min + vec2(x as f32, y as f32));
+            }
+        }
+    } else {
+        let s = if globe_view { 1.0 } else { (old.res / cam.res) as f32 };
         for l in &app.map.labels {
-            draw_label(&painter, l, pos2(rect.min.x + l.x + dx, rect.min.y + l.y + dy));
+            draw_label(&painter, l, tex_rect.min + vec2(l.x, l.y) * s);
         }
     }
     overlays(app, ui, &painter, rect, &t);
     popup(app, ui, rect);
+}
+
+/// The least time (s) between frames drawn mid-motion, for frames taking `ms` to draw: quick
+/// ones as often as 30 a second, slower ones further apart so the motion between them stays
+/// smooth.
+fn motion_gap(ms: f64) -> f64 {
+    let s = ms.min(300.0) / 1000.0;
+    (if ms <= 60.0 { s * 1.5 } else { s * 3.0 }).max(1.0 / 30.0)
+}
+
+/// Where the map's last frame (drawn for `tex_camera`) lies on screen for the camera `cam`.
+fn tex_rect(app: &RustGisApp, cam: Camera, rect: Rect, globe_view: bool) -> Rect {
+    let (w, h) = (rect.width() as f64, rect.height() as f64);
+    let old = app.map.tex_camera;
+    if globe_view {
+        // Where the old frame's centre now is, at the new zoom.
+        let (old_g, new_g) = (Globe::new(&old, w, h), Globe::new(&cam, w, h));
+        let s = (new_g.radius() / old_g.radius()) as f32;
+        return match new_g.forward(old.center_lonlat()) {
+            Some((x, y)) if s.is_finite() => Rect::from_center_size(pos2(rect.min.x + x as f32, rect.min.y + y as f32), rect.size() * s),
+            _ => rect,
+        };
+    }
+    let (tw, th) = if app.map.tex_size.0 > 0.0 { app.map.tex_size } else { (w, h) };
+    let e0 = old.extent(tw, th);
+    let to_screen = |x: f64, y: f64| {
+        let (sx, sy) = cam.to_screen(Coord::new(x, y), w, h);
+        pos2(rect.min.x + sx as f32, rect.min.y + sy as f32)
+    };
+    Rect::from_min_max(to_screen(e0.min_x, e0.max_y), to_screen(e0.max_x, e0.min_y))
 }
 
 fn draw_label(p: &egui::Painter, l: &PlacedLabel, at: Pos2) {
@@ -1097,8 +1189,9 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     {
         let r = 70.0;
         let centre = pos2((ptr.x + r + 24.0).min(rect.max.x - r - 4.0), (ptr.y - r - 24.0).max(rect.min.y + r + 4.0));
-        let uv_c = vec2((ptr.x - rect.min.x) / rect.width(), (ptr.y - rect.min.y) / rect.height());
-        let half = vec2(r / 2.0 / rect.width(), r / 2.0 / rect.height());
+        let tr = if app.map.tex_rect.is_positive() { app.map.tex_rect } else { rect };
+        let uv_c = vec2((ptr.x - tr.min.x) / tr.width(), (ptr.y - tr.min.y) / tr.height());
+        let half = vec2(r / 2.0 / tr.width(), r / 2.0 / tr.height());
         let mut mesh = egui::Mesh::with_texture(tex.id());
         let n = 48;
         let centre_uv = pos2(uv_c.x, uv_c.y);
