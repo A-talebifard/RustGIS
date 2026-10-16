@@ -17,7 +17,6 @@ struct Key {
     rev: u64,
     cam: (i64, i64, i64),
     size: [usize; 2],
-    dark: bool,
     /// Rendered at reduced resolution while the globe was moving.
     draft: bool,
     /// The tile cache's generation (0 for a map without tile layers).
@@ -108,6 +107,8 @@ pub struct MapView {
     last_render: f64,
     /// The map drawn flat and laid over the globe while it moves.
     drape: crate::globe_drape::GlobeDrape,
+    /// Shooting stars around the globe.
+    comets: crate::comets::Comets,
 }
 
 impl Default for MapView {
@@ -140,6 +141,7 @@ impl Default for MapView {
             tile_errors: std::collections::HashSet::new(),
             last_render: -10.0,
             drape: Default::default(),
+            comets: Default::default(),
         }
     }
 }
@@ -223,19 +225,10 @@ fn split_view(app: &mut RustGisApp, ui: &mut Ui, other: usize, rect: Rect, t: &T
     let ppp = ui.ctx().pixels_per_point();
     let revision = app.session.revision;
     let Some(m) = app.session.project.maps.get_mut(other) else { return };
-    let view = View { width: w, height: h, pixels_per_point: ppp as f64, camera: m.camera, dark: t.dark };
+    let view = View { width: w, height: h, pixels_per_point: ppp as f64, camera: m.camera };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, c32(m.basemap.palette().0));
-    let key = [
-        other as f64,
-        revision as f64,
-        m.camera.center.x,
-        m.camera.center.y,
-        m.camera.res,
-        w,
-        h,
-        f64::from(ppp) + if t.dark { 100.0 } else { 0.0 },
-    ];
+    let key = [other as f64, revision as f64, m.camera.center.x, m.camera.center.y, m.camera.res, w, h, f64::from(ppp)];
     if app.map.split.as_ref().is_none_or(|(k, _, _)| *k != key)
         && let Some(r) = rustgis_engine::render::render(m, &view)
     {
@@ -301,8 +294,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let dragging = app.map.drag.is_some_and(|(_, k)| k == DragKind::Pan);
     let moving = dragging || time - app.map.last_interaction < 0.18;
     let draped = if globe_view && moving {
-        let key =
-            crate::globe_drape::DrapeKey { rev: app.session.revision, dark: t.dark, sources: rustgis_engine::map::source::generation() };
+        let key = crate::globe_drape::DrapeKey { rev: app.session.revision, sources: rustgis_engine::map::source::generation() };
         let tiles = if app.session.map().tiles.is_empty() { 0 } else { rustgis_engine::render::rustgis_tiles::cache::generation() };
         app.map.drape.prepare(ui.ctx(), app.session.map_mut(), key, tiles, w, h, ppp, time)
     } else {
@@ -317,7 +309,6 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         rev: app.session.revision,
         cam: ((cam.center.x * 100.0) as i64, (cam.center.y * 100.0) as i64, (cam.res * 1000.0) as i64),
         size: [(w as f32 * ppp).round() as usize, (h as f32 * ppp).round() as usize],
-        dark: t.dark,
         draft,
         tiles: 0,
         sources: rustgis_engine::map::source::generation(),
@@ -353,7 +344,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let stale = app.map.key != Some(key);
     if stale && (!interacting || app.map.texture.is_none() || app.map.key.is_some_and(|k| k.rev != key.rev || k.size != key.size)) {
         let t0 = web_time::Instant::now();
-        let view = View { width: w, height: h, pixels_per_point: render_ppp as f64, camera: cam, dark: t.dark };
+        let view = View { width: w, height: h, pixels_per_point: render_ppp as f64, camera: cam };
         if let Some(r) = rustgis_engine::render::render(app.session.map_mut(), &view) {
             let size = [r.pixmap.width() as usize, r.pixmap.height() as usize];
             let img = egui::ColorImage::from_rgba_premultiplied(size, r.pixmap.data());
@@ -387,11 +378,12 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     // Behind the (possibly shifted or shrunk) last frame: the map's own background, so zooming
     // out never shows a band of window colour around it.
     let basemap = app.session.map().basemap;
-    let backdrop = c32(if globe_view { rustgis_engine::render::globe_space(t.dark, basemap) } else { basemap.palette().0 });
     if draped {
-        app.map.drape.paint(&painter, rect, app.session.map(), t.dark);
+        app.map.drape.paint(ui.ctx(), &painter, rect, app.session.map(), ppp);
+    } else if globe_view {
+        app.map.drape.paint_space(ui.ctx(), &painter, rect, app.session.map(), ppp);
     } else {
-        painter.rect_filled(rect, 0.0, backdrop);
+        painter.rect_filled(rect, 0.0, c32(basemap.palette().0));
     }
     let old = app.map.tex_camera;
     let e0 = old.extent(w, h);
@@ -412,6 +404,16 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     if let Some(tex) = app.map.texture.as_ref().filter(|_| !draped) {
         painter.image(tex.id(), tex_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
+    // Shooting stars, while space shows around the globe.
+    let g = Globe::new(&cam, w, h);
+    let (gx, gy) = g.center();
+    let space = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].iter().any(|&(x, y)| (x - gx).hypot(y - gy) > g.disc_radius());
+    if globe_view && space && app.session.map().view.effects.stars {
+        let wait = app.map.comets.paint(&painter, rect, &g, time);
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.clamp(0.0, 60.0)));
+    } else {
+        app.map.comets.clear();
     }
     // Labels (moved with the texture; hidden while zooming, and while the globe moves, where
     // re-placing them every frame would make them flicker).
