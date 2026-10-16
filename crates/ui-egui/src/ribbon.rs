@@ -550,7 +550,89 @@ fn basemap_gallery(ui: &mut Ui, app: &mut RustGisApp) {
             }
         }
     });
+    web_basemaps(ui, app, &t);
     tile_layers(ui, app, &t);
+}
+
+const OPENFREEMAP: &str = "OpenFreeMap © OpenMapTiles Data from OpenStreetMap";
+
+/// Web basemaps that need no API key, offered next to the built-in ones:
+/// (id, name, kind, url, attribution, max zoom).
+const WEB_BASEMAPS: [(&str, &str, &str, &str, &str, u8); 6] = [
+    ("openfreemap-liberty", "OpenFreeMap Liberty", "style", "https://tiles.openfreemap.org/styles/liberty", OPENFREEMAP, 14),
+    ("openfreemap-bright", "OpenFreeMap Bright", "style", "https://tiles.openfreemap.org/styles/bright", OPENFREEMAP, 14),
+    ("openfreemap-positron", "OpenFreeMap Positron", "style", "https://tiles.openfreemap.org/styles/positron", OPENFREEMAP, 14),
+    ("openfreemap-dark", "OpenFreeMap Dark", "style", "https://tiles.openfreemap.org/styles/dark", OPENFREEMAP, 14),
+    ("openfreemap-fiord", "OpenFreeMap Fiord", "style", "https://tiles.openfreemap.org/styles/fiord", OPENFREEMAP, 14),
+    (
+        "usgs-imagery",
+        "USGS Imagery",
+        "raster",
+        "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+        "USGS The National Map",
+        16,
+    ),
+];
+
+/// The id of the registry plugin with many more web basemaps.
+const BASEMAPS_PLUGIN: &str = "basemaps";
+
+/// Web basemaps (OpenFreeMap, USGS) that replace the other tile basemaps, and where to get more.
+fn web_basemaps(ui: &mut Ui, app: &mut RustGisApp, t: &Tokens) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(egui::RichText::new(tl!("Web Basemaps")).font(semibold(12.5)));
+    ui.add_space(2.0);
+    // The web basemap on top (the one showing), if any.
+    let top = app.session.map().tiles.iter().find(|l| !l.overlay && l.visible).map(|l| l.id.clone());
+    egui::Grid::new("web-basemaps").spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+        for (i, (id, name, kind, url, attribution, max_zoom)) in WEB_BASEMAPS.into_iter().enumerate() {
+            let sel = top.as_deref() == Some(id);
+            let resp = ui.add_sized(vec2(140.0, 22.0), egui::Button::selectable(sel, name)).on_hover_text(url);
+            if resp.clicked() {
+                let p = json!({"url": url, "kind": kind, "name": name, "attribution": attribution, "maxZoom": max_zoom, "id": id, "replace": true});
+                let _ = app.run("map.addTiles", p);
+                ui.close();
+            }
+            if i % 2 == 1 {
+                ui.end_row();
+            }
+        }
+    });
+    ui.add_space(4.0);
+    // The plugin's tab when it shows; else the Plugin Manager, to turn the plugin on or install it.
+    let tab = plugin_tab_id(BASEMAPS_PLUGIN);
+    let (ask, link, hint, then) = if plugin_tabs(app).iter().any(|(id, _)| *id == tab) {
+        (tl!("More basemaps:"), tl!("Open the Basemaps tab"), tl!("The Basemaps plugin's tab of public basemaps."), None)
+    } else if rustgis_engine::plugins::get(BASEMAPS_PLUGIN).is_some() {
+        (
+            tl!("More basemaps:"),
+            tl!("Turn on the Basemaps plugin"),
+            tl!("It's installed but turned off: turn it on in the Plugin Manager."),
+            Some(json!({"open": true, "tab": "installed"})),
+        )
+    } else {
+        (
+            tl!("Want more basemaps?"),
+            tl!("Install the Basemaps plugin"),
+            tl!("OpenStreetMap, Esri, USGS, NASA and more, from the plugin registry."),
+            Some(json!({"open": true, "tab": "browse", "filter": BASEMAPS_PLUGIN})),
+        )
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new(ask).weak().small());
+        let resp = ui.add(egui::Link::new(egui::RichText::new(link).small().color(t.accent)));
+        if resp.on_hover_text(hint).clicked() {
+            match then {
+                Some(p) => {
+                    let _ = app.run("ui.plugins", p);
+                }
+                None => app.ui.tab = tab.clone(),
+            }
+            ui.close();
+        }
+    });
 }
 
 /// The map's web tile layers (top first): shown, opacity, order and removal, and adding one.
