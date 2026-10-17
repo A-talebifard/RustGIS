@@ -660,6 +660,7 @@ fn hostile_params_never_panic() {
         json!({"layer": "Cities", "rows": [1, 99999999], "geometry": {"type": "Polygon", "coordinates": [[]]}, "width": 1e9, "height": -3, "expression": "'"}),
         json!({"band": -1, "red": 1e12, "green": "x", "blue": f64::MAX, "preset": "", "ramp": "nope", "classes": -5, "n": 1e308, "low": -50, "high": 900, "gamma": 0, "zFactor": -1, "fileName": "a.tif", "data": "!!!"}),
         json!({"fileName": "a.tif", "data": "AAAA", "type": "unique", "on": "maybe"}),
+        json!({"type": "custom", "min": 1e308, "max": -1e308}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -6826,4 +6827,60 @@ fn buffer_point_adds_only_the_buffer() {
     assert!((e.max_y - e.min_y - 2.0 / 111.2).abs() < 0.002, "a 1 km radius: {e:?}");
     assert!(s.run("gp.bufferPoint", &json!({"lon": 200, "lat": 0, "distance": 1})).is_err());
     assert!(s.run("gp.bufferPoint", &json!({"lon": 0, "lat": 0})).is_err());
+}
+
+#[test]
+fn raster_stretch_custom_bounds() {
+    use rustgis_map::Stretch;
+    let mut s = with_raster();
+    let stretch = |s: &Session| s.map().layers.last().unwrap().raster.as_ref().unwrap().style.stretch;
+    let stats = s.map().layers.last().unwrap().raster.as_ref().unwrap().data.as_ref().unwrap().bands[0].stats.clone();
+    s.run("raster.stretch", &json!({"type": "custom", "min": 10, "max": 200})).unwrap();
+    assert_eq!(stretch(&s), Stretch::Custom { min: 10.0, max: 200.0 });
+    // A missing bound is the layer's own statistic.
+    s.run("raster.stretch", &json!({"type": "custom", "min": 10})).unwrap();
+    assert_eq!(stretch(&s), Stretch::Custom { min: 10.0, max: stats.max });
+    // The bounds survive DRA and a project round trip.
+    s.run("raster.dra", &json!({"on": true})).unwrap();
+    let kept = serde_json::to_string(&stretch(&s)).unwrap();
+    assert_eq!(serde_json::from_str::<Stretch>(&kept).unwrap(), stretch(&s));
+    // Bad bounds are refused and leave the stretch alone.
+    let before = stretch(&s);
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": 5, "max": 5})).is_err());
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": 9, "max": 1})).is_err());
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": 1e308})).is_err());
+    // A bound that was given but isn't a number is refused, not replaced by the layer's own.
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": "NaN", "max": 100})).is_err());
+    assert!(s.run("raster.stretch", &json!({"type": "custom", "min": "abc"})).is_err());
+    assert_eq!(stretch(&s), before);
+    // A band with one value still gets a range to edit from.
+    let mut flat = with_raster();
+    {
+        let rl = flat.map_mut().layers.last_mut().and_then(|l| l.raster.as_mut()).unwrap();
+        let mut d = (**rl.data.as_ref().unwrap()).clone();
+        d.bands[0].stats.min = 7.0;
+        d.bands[0].stats.max = 7.0;
+        rl.data = Some(std::sync::Arc::new(d));
+    }
+    flat.run("raster.stretch", &json!({"type": "custom"})).unwrap();
+    assert_eq!(stretch(&flat), Stretch::Custom { min: 6.5, max: 7.5 });
+    // The padding follows the value's size, and statistics that aren't numbers are refused.
+    let set_stats = |s: &mut Session, v: f64| {
+        let rl = s.map_mut().layers.last_mut().and_then(|l| l.raster.as_mut()).unwrap();
+        let mut d = (**rl.data.as_ref().unwrap()).clone();
+        d.bands[0].stats.min = v;
+        d.bands[0].stats.max = v;
+        rl.data = Some(std::sync::Arc::new(d));
+    };
+    set_stats(&mut flat, 9007199254740992.0);
+    flat.run("raster.stretch", &json!({"type": "custom"})).unwrap();
+    assert!(matches!(stretch(&flat), Stretch::Custom { min, max } if min < 9007199254740992.0 && max > 9007199254740992.0));
+    let before = stretch(&flat);
+    for v in [f64::NAN, f64::INFINITY] {
+        set_stats(&mut flat, v);
+        assert!(flat.run("raster.stretch", &json!({"type": "custom"})).is_err(), "{v}");
+    }
+    assert_eq!(stretch(&flat), before);
+    // Projects saved before the custom stretch still load.
+    assert_eq!(serde_json::from_str::<Stretch>("\"MinMax\"").unwrap(), Stretch::MinMax);
 }

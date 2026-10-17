@@ -35,14 +35,45 @@ pub fn commands() -> Vec<C> {
         ),
         C::new("raster.stretch", "Stretch Type", "Style › Rendering", |s, p| {
             let code = ps(p, "type").ok_or("type is required")?;
-            let st = Stretch::from_code(code, f(p, "low"), f(p, "high"), f(p, "n")).ok_or_else(|| format!("unknown stretch '{code}'"))?;
-            with(s, p, |rl, _| {
+            // A bound that was given but isn't a finite number is refused, not replaced by the layer's own.
+            let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+            for k in ["min", "max"] {
+                if given(k) && f(p, k).is_none() {
+                    return Err(format!("{k} must be a finite number"));
+                }
+            }
+            let (min, max) = (f(p, "min"), f(p, "max"));
+            with(s, p, |rl, r| {
+                // Only a custom stretch reads the statistics: those of the band being drawn.
+                let band = rl.style.renderer.bands().first().copied().unwrap_or(0);
+                let stats = r.bands.get(band).map(|b| &b.stats);
+                if code.trim().eq_ignore_ascii_case("custom") && stats.is_none() {
+                    return Err("the raster has no bands".into());
+                }
+                let mut st = Stretch::from_code(code, f(p, "low"), f(p, "high"), f(p, "n"), min, max, stats)
+                    .ok_or_else(|| format!("unknown stretch '{code}'"))?;
+                // A band with a single value has no range of its own: open one around it to edit from.
+                if let Stretch::Custom { min: lo, max: hi } = st
+                    && min.is_none()
+                    && max.is_none()
+                    && lo >= hi
+                {
+                    // Padded by the value's magnitude too, or a large value would absorb ±0.5.
+                    let pad = (lo.abs() * 1e-6).max(0.5);
+                    st = Stretch::Custom { min: lo - pad, max: hi + pad };
+                }
+                // Statistics can be NaN or infinite (a band of nodata), which `min >= max` alone misses.
+                if let Stretch::Custom { min, max } = st
+                    && !(min.is_finite() && max.is_finite() && min < max)
+                {
+                    return Err(format!("min {min} must be a finite number less than max {max}"));
+                }
                 rl.style.stretch = st;
                 Ok(())
             })
         })
         .when(need_raster)
-        .params(r#"{"layer"?, "type": "none"|"minMax"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations}"#),
+        .params(r#"{"layer"?, "type": "none"|"minMax"|"custom"|"percentClip"|"standardDeviation"|"histogramEqualize", "low"?: %, "high"?: %, "n"?: deviations, "min"?, "max"?: custom bounds in the data's units (a missing one is the layer's own)}"#),
         C::new("raster.dra", "DRA", "Style › Rendering", |s, p| {
             let on = b(p, "on");
             with(s, p, |rl, _| {
