@@ -219,6 +219,15 @@ them). Notes such as "MCP server ready" go to standard error; standard output ca
 protocol.
 
 
+### Local-agent approvals
+
+Local agents launched by the assistant use `Relay::grant_reviewed(auto)`, not an unrestricted
+run grant. With automatic approval off, gated tool calls wait in a RustGIS-side queue scoped to
+that grant and exact message, including all tool calls in a batch. `--yes` and the general relay
+checkbox do not bypass it. An approval cannot revive an expired request; revoking the grant or
+stopping the relay cancels pending work. Explicit automatic approval bypasses this extra queue
+for that run. Ordinary MCP clients retain the access policy described above.
+
 Stopping the relay through its command or status-bar control also turns off its remembered
 agent-control choice. Copyable setup commands are labelled for POSIX shells or PowerShell and
 quote the executable path literally; use the matching shell.
