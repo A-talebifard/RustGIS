@@ -2040,7 +2040,6 @@ The map is drawn in this coordinate system; layers are projected on the fly.	Die
 The map view as it is now	Die Kartenansicht im aktuellen Zustand
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	Der Kartenausschnitt umfasst {n} der {ty}-Dateien von Overture (höchstens {max}): hineinzoomen oder das Thema als Kartenkacheln hinzufügen
 The model answering; click to change it	Das antwortende Modell; zum Ändern klicken
-the model declined this request	das Modell hat diese Anfrage abgelehnt
 The model sent an empty reply; ask again, or try another model.	Das Modell hat eine leere Antwort gesendet; fragen Sie erneut oder versuchen Sie ein anderes Modell.
 the page is too large to draw	die Seite ist zu groß zum Zeichnen
 the picture is too large to show	das Bild ist zu groß zum Anzeigen
@@ -2315,6 +2314,18 @@ Let your Agents Control RustGIS	Ihre Agenten RustGIS steuern lassen
 Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Agenten auf diesem Computer, die sich verbinden (Claude Code, Codex, Cursor und andere), arbeiten mit den Werkzeugen von RustGIS an der hier geöffneten Karte: Sie können Dateien öffnen und speichern und das Web nutzen. Skripte und die Plugin-Verwaltung bleiben aus.
 Add this MCP server to your agent:	Fügen Sie diesen MCP-Server Ihrem Agenten hinzu:
 Or run, for Claude Code or Codex:	Oder führen Sie für Claude Code oder Codex aus:
+Compact	Verdichten
+Summarise the conversation so far, so a long chat stays within the model's context	Den bisherigen Verlauf zusammenfassen, damit ein langer Chat in den Kontext des Modells passt
+The reply reached its length limit.	Die Antwort hat ihre Längenbegrenzung erreicht.
+The provider's content filter stopped the reply.	Der Inhaltsfilter des Anbieters hat die Antwort gestoppt.
+The reply stopped early ({reason}).	Die Antwort wurde vorzeitig beendet ({reason}).
+The model declined this request.	Das Modell hat diese Anfrage abgelehnt.
+The model declined this request: {why}	Das Modell hat diese Anfrage abgelehnt: {why}
+Gemini stopped the reply ({reason}).	Gemini hat die Antwort gestoppt ({reason}).
+Summarising the earlier conversation to keep it within the model's context…	Der bisherige Verlauf wird zusammengefasst, damit er in den Kontext des Modells passt…
+Compacted the earlier conversation.	Der bisherige Verlauf wurde verdichtet.
+The connection failed; trying again in {seconds} s.	Die Verbindung ist fehlgeschlagen; neuer Versuch in {seconds} s.
+Stopped after {steps} steps; say "continue" to go on.	Nach {steps} Schritten angehalten; sagen Sie „weiter", um fortzufahren.
 The service's answer isn't UTF-8 text	Die Antwort des Dienstes ist kein UTF-8-Text
 Import All	Alle importieren
 Import Service	Dienst importieren

@@ -2040,7 +2040,6 @@ The map is drawn in this coordinate system; layers are projected on the fly.	Xə
 The map view as it is now	Xəritə görünüşü indiki halında
 The map's view takes {n} of Overture's {ty} files (up to {max}): zoom in, or add the theme as map tiles	Xəritə görünüşü Overture-un {n} {ty} faylını tutur (ən çoxu {max}): yaxınlaşdırın və ya mövzunu xəritə kafelləri kimi əlavə edin
 The model answering; click to change it	Cavab verən model; dəyişmək üçün klikləyin
-the model declined this request	model bu sorğunu rədd etdi
 The model sent an empty reply; ask again, or try another model.	Model boş cavab göndərdi; yenidən soruşun və ya başqa model sınayın.
 the page is too large to draw	səhifə çəkmək üçün çox böyükdür
 the picture is too large to show	şəkil göstərmək üçün çox böyükdür
@@ -2315,6 +2314,18 @@ Let your Agents Control RustGIS	Agentlərinizə RustGIS-i idarə etməyə icazə
 Agents on this computer that connect (Claude Code, Codex, Cursor and others) work on the map open here, with RustGIS's tools: they can open and save files and use the web. Scripts and plugin management stay off.	Qoşulan bu kompüterdəki agentlər (Claude Code, Codex, Cursor və digərləri) RustGIS-in alətləri ilə burada açıq olan xəritə üzərində işləyir: faylları aça, saxlaya və vebdən istifadə edə bilərlər. Skriptlər və plagin idarəsi söndürülü qalır.
 Add this MCP server to your agent:	Bu MCP serverini agentinizə əlavə edin:
 Or run, for Claude Code or Codex:	Və ya Claude Code və ya Codex üçün bunu işlədin:
+Compact	Sıxışdır
+Summarise the conversation so far, so a long chat stays within the model's context	Uzun söhbət modelin kontekstinə sığsın deyə indiyədək olan söhbəti xülasə et
+The reply reached its length limit.	Cavab uzunluq limitinə çatdı.
+The provider's content filter stopped the reply.	Provayderin məzmun filtri cavabı dayandırdı.
+The reply stopped early ({reason}).	Cavab vaxtından əvvəl dayandı ({reason}).
+The model declined this request.	Model bu sorğunu rədd etdi.
+The model declined this request: {why}	Model bu sorğunu rədd etdi: {why}
+Gemini stopped the reply ({reason}).	Gemini cavabı dayandırdı ({reason}).
+Summarising the earlier conversation to keep it within the model's context…	Əvvəlki söhbət modelin kontekstinə sığması üçün xülasə edilir…
+Compacted the earlier conversation.	Əvvəlki söhbət sıxışdırıldı.
+The connection failed; trying again in {seconds} s.	Bağlantı alınmadı; {seconds} san sonra yenidən cəhd ediləcək.
+Stopped after {steps} steps; say "continue" to go on.	{steps} addımdan sonra dayandırıldı; davam etmək üçün "davam et" deyin.
 The service's answer isn't UTF-8 text	Xidmətin cavabı UTF-8 mətni deyil
 Import All	Hamısını idxal et
 Import Service	Xidməti idxal et

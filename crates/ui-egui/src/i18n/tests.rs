@@ -115,6 +115,19 @@ fn chatgpt_recovery_and_controls_have_real_translations() {
 }
 
 #[test]
+fn assistant_note_translations_are_real_when_available() {
+    for l in &LANGUAGES[1..] {
+        let (m, _) = parse(l.source);
+        for template in rustgis_assistant::provider::NOTE_TEMPLATES {
+            // AGENTS.md permits English fallback for new keys until the maintainer translates.
+            if let Some(tr) = m.get(*template) {
+                assert_ne!(tr, template, "{}: {template:?} isn't translated", l.code);
+            }
+        }
+    }
+}
+
+#[test]
 fn letting_agents_control_rustgis_is_in_every_catalog() {
     let keys = [
         "Let your Agents Control RustGIS",
