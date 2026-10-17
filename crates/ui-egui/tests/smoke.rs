@@ -144,12 +144,14 @@ fn nested_children_from_kml_kmz_and_categorized_files_are_sorted() {
         if categorize {
             h.state_mut().run("layer.symbology", json!({"layer":id,"type":"unique","field":"category"})).unwrap();
         }
-        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu", "<all other values>"]);
+        // Every feature has a class, so the unused "<all other values>" row is left out (#207).
+        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu"]);
+        assert!(h.query_by_label("<all other values>").is_none(), "{file}");
         // Collapsing and reopening uses the same ordering.
         h.state_mut().run("layer.expand", json!({"layer":id,"on":false})).unwrap();
         h.step();
         h.state_mut().run("layer.expand", json!({"layer":id,"on":true})).unwrap();
-        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu", "<all other values>"]);
+        assert_child_order(&mut h, &["alpha", "Bravo", "Zulu"]);
     }
 }
 
