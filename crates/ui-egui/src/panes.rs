@@ -440,6 +440,16 @@ pub fn follow_layer_filter(app: &mut RustGisApp) {
     }
 }
 
+/// Clears the Layers filter if it hides layer `id`, which would otherwise stop being the active
+/// layer on the next frame (Show Me makes a step's layer active to open its symbology).
+pub fn reveal_in_filter(app: &mut RustGisApp, id: u32) {
+    let q = filter_query(&app.ui.layer_filter);
+    if app.session.map().layer(id).is_some_and(|l| !filter_shows(&q, &l.name)) {
+        app.ui.layer_filter.clear();
+        app.ui.layer_filter_hid = None;
+    }
+}
+
 /// The filter's text as matched: trimmed and lowercased (empty: no filter).
 fn filter_query(text: &str) -> String {
     text.trim().to_lowercase()
@@ -1715,11 +1725,22 @@ fn catalog(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                             icons::paint(ui.painter(), r, "run", t.icon, t.accent);
                             let resp = ui
                                 .link(crate::i18n::fmt("{name} ({n} steps)", &[("name", &n), ("n", &steps.to_string())]))
-                                .on_hover_text(tl!("Run the task"));
+                                .on_hover_text(tl!("Open the task's steps"));
+                            // A click opens the steps; running them all at once is a deliberate
+                            // choice, in the context menu.
                             if resp.clicked() {
-                                let _ = app.run("task.run", json!({"task": n}));
+                                app.ws.task = n.clone();
+                                app.ws.task_step = 0;
+                                // An edit open on another task's step mustn't be saved into this one.
+                                app.ws.task_edit = None;
+                                app.ui.right = Some(RightPane::Tasks);
                             }
                             resp.context_menu(|ui| {
+                                if ui.button(tl!("Run All Steps")).clicked() {
+                                    let _ = app.run("task.run", json!({"task": n}));
+                                    app.map.invalidate();
+                                    ui.close();
+                                }
                                 if ui.button(tl!("Delete")).clicked() {
                                     let _ = app.run("task.remove", json!({"task": n}));
                                     ui.close();

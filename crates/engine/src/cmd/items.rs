@@ -194,7 +194,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.template", "Layer Template", "Data › Layer Templates", layer_template)
             .params(r#"{"template": "points"|"lines"|"polygons"|"places"|"routes"|"areas"|"observations", "name"?: string}"#),
         // Tasks.
-        C::new("task.new", "New Task", "Home › Project", |s, p| {
+        C::new("task.new", "New Task", "Analyze › Tasks", |s, p| {
             let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Task");
             let steps: Vec<TaskStep> = match p.get("steps") {
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?,
@@ -245,6 +245,59 @@ pub fn commands() -> Vec<C> {
             Ok(json!({"steps": t.steps.len()}))
         })
         .params(r#"{"task"?: name, "title": string, "instructions"?: string, "command": id, "params"?: {}}"#),
+        // Editing a step's words, its place or the step itself. Its command and parameters stay
+        // as they were, so a task from a file stays as untrusted as it came.
+        C::new("task.editStep", "Edit Task Step", "Tasks", |s, p| {
+            let (title, instructions) = (ps(p, "title"), ps(p, "instructions"));
+            if title.is_some_and(|t| t.trim().is_empty()) {
+                return Err("a step needs a title".into());
+            }
+            if title.is_none() && instructions.is_none() {
+                return Err("title or instructions is required".into());
+            }
+            let step = step_index(p)?;
+            let t = task_mut(s, p)?;
+            let n = t.steps.len();
+            let st = t.steps.get_mut(step).ok_or_else(|| format!("{} has {n} steps", t.name))?;
+            let title = title.map_or_else(|| st.title.clone(), |t| t.trim().chars().take(200).collect());
+            let instructions = instructions.map_or_else(|| st.instructions.clone(), |t| t.chars().take(4000).collect());
+            // Changing nothing would still leave an undo step.
+            if title == st.title && instructions == st.instructions {
+                return Err(format!("step {step} already reads so"));
+            }
+            st.title = title;
+            st.instructions = instructions;
+            Ok(json!({"step": step}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0), "title"?: string, "instructions"?: string}"#),
+        C::new("task.moveStep", "Move Task Step", "Tasks", |s, p| {
+            let to = match p.get("to") {
+                None | Some(Value::Null) => return Err("to is required".into()),
+                Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| format!("to must be a whole number from 0, not {v}"))?,
+            };
+            let step = step_index(p)?;
+            let t = task_mut(s, p)?;
+            if step >= t.steps.len() || to >= t.steps.len() {
+                return Err(format!("{} has {} steps", t.name, t.steps.len()));
+            }
+            if step == to {
+                return Err(format!("step {step} is already there"));
+            }
+            let st = t.steps.remove(step);
+            t.steps.insert(to, st);
+            Ok(json!({"step": to}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0), "to": number (from 0)}"#),
+        C::new("task.removeStep", "Delete Task Step", "Tasks", |s, p| {
+            let step = step_index(p)?;
+            let t = task_mut(s, p)?;
+            if step >= t.steps.len() {
+                return Err(format!("{} has {} steps", t.name, t.steps.len()));
+            }
+            t.steps.remove(step);
+            Ok(json!({"steps": t.steps.len()}))
+        })
+        .params(r#"{"task"?: name, "step": number (from 0)}"#),
         C::new("task.run", "Run Task", "Tasks", run_task).params(r#"{"task"?: name, "step"?: number (one step; all when omitted)}"#),
         C::new("task.remove", "Delete Task", "Tasks", |s, p| {
             let name = ps(p, "task").ok_or("task is required")?;
@@ -258,7 +311,7 @@ pub fn commands() -> Vec<C> {
         C::new("task.save", "Save Task Item", "Publish › Save As", |s, p| save_item(s, "task", p))
         .view()
         .params(r#"{"task"?: name, "path": "*.rgistask"}"#),
-        C::new("task.import", "Import Task", "Home › Project", |s, p| {
+        C::new("task.import", "Import Task", "Analyze › Tasks", |s, p| {
             let text = read_text(p)?;
             let t: Task = serde_json::from_str(&text).map_err(|e| format!("not a RustGIS task: {e}"))?;
             // A task from a file is someone else's: it may not read or write files, or run scripts.
@@ -554,6 +607,15 @@ fn task_ref<'a>(s: &'a Session, p: &Value) -> Result<&'a Task, String> {
     }
 }
 
+/// A step's index from `step` (from 0).
+fn step_index(p: &Value) -> Result<usize, String> {
+    // Checked: on wasm32 `as usize` would wrap a large number round to a small, valid index.
+    match p.get("step") {
+        None | Some(Value::Null) => Err("step is required".to_string()),
+        Some(v) => v.as_u64().and_then(|i| usize::try_from(i).ok()).ok_or_else(|| format!("step must be a whole number from 0, not {v}")),
+    }
+}
+
 fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
     match ps(p, "task") {
         Some(n) => s.project.tasks.iter_mut().find(|t| t.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no task '{n}'")),
@@ -564,8 +626,12 @@ fn task_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Task, String> {
 /// Runs a task's steps (or one of them), stopping at the first that fails.
 fn run_task(s: &mut Session, p: &Value) -> CmdResult {
     let t = task_ref(s, p)?.clone();
-    let steps: Vec<(usize, TaskStep)> = match p.get("step").and_then(Value::as_u64) {
-        Some(i) => vec![(i as usize, t.steps.get(i as usize).cloned().ok_or_else(|| format!("{} has {} steps", t.name, t.steps.len()))?)],
+    // `"step": null` runs them all, as no step does.
+    let steps: Vec<(usize, TaskStep)> = match p.get("step").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let i = step_index(p)?;
+            vec![(i, t.steps.get(i).cloned().ok_or_else(|| format!("{} has {} steps", t.name, t.steps.len()))?)]
+        }
         None => t.steps.iter().cloned().enumerate().collect(),
     };
     let mut done = Vec::new();
@@ -607,7 +673,7 @@ fn run_task(s: &mut Session, p: &Value) -> CmdResult {
 pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
     const KEYS: &[&str] =
         &["path", "folder", "dir", "file", "url", "uri", "source", "output", "connection", "database", "data", "text", "poster", "locator"];
-    let reaches = |v: &Value| names_place(v, KEYS, 0);
+    let reaches = |v: &Value| names_place(&layer_name_left_out(command, v), KEYS, 0);
     let id = command.to_ascii_lowercase();
     let verb = id.split('.').nth(1).unwrap_or("");
     ["script.", "notebook.", "model.", "project.", "task.", "share.", "offline.", "cache.", "locator."].iter().any(|p| id.starts_with(p))
@@ -615,6 +681,37 @@ pub(crate) fn touches_files(command: &str, params: &Value) -> bool {
         // Its inputs may be bare file names, which don't look like paths.
         || id == "raster.mosaic"
         || reaches(params)
+}
+
+/// Parameters without a built-in tool's output layer name, which stays in the session, so a task
+/// (or a model, or a notebook) from a file may set it: only `gp.run`'s `{"tool", "params"}` shape,
+/// only `params.output`, only for the tools in `rustgis_analysis::TOOLS`, which name their output
+/// layer and never a file through it (see `out_name` there), not GeoLibre or plugin tools, which may
+/// write theirs as files, and only a plain name, with no `/`, `\`, `.` or `:`. Anything else stays
+/// a place.
+fn layer_name_left_out<'a>(command: &str, params: &'a Value) -> std::borrow::Cow<'a, Value> {
+    use std::borrow::Cow;
+    // Resolved as gp.run resolves it (by id or name, a built-in tool first), then held to the
+    // built-in list, so the two can't drift: an external tool of a built-in's name isn't let in.
+    let built_in = || {
+        params
+            .get("tool")
+            .and_then(Value::as_str)
+            .and_then(rustgis_analysis::tool)
+            .is_some_and(|spec| rustgis_analysis::TOOLS.iter().any(|b| std::ptr::eq(b, spec)))
+    };
+    let plain = |t: &str| !t.trim().is_empty() && !t.contains(['/', '\\', '.', ':']) && !looks_like_path(t);
+    let named = || params.pointer("/params/output").and_then(Value::as_str).is_some_and(plain);
+    // Copied only when there is a name to leave out: other commands' parameters (a file's
+    // contents, say) are read as they are.
+    if command != "gp.run" || !built_in() || !named() {
+        return Cow::Borrowed(params);
+    }
+    let mut out = params.clone();
+    if let Some(p) = out.get_mut("params").and_then(Value::as_object_mut) {
+        p.remove("output");
+    }
+    Cow::Owned(out)
 }
 
 /// Whether a string looks like a file path or an address.

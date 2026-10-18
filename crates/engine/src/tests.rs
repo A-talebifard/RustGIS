@@ -484,6 +484,83 @@ fn geotiff_parts_open_and_survive_a_saved_project() {
 }
 
 #[test]
+fn imported_tasks_name_outputs_and_steps_are_edited() {
+    let mut s = Session::new(sample::world_project());
+    // A task from a file may name a tool's output layer, but not write to a path through it.
+    let lesson = json!({"name": "Lesson", "steps": [
+        {"title": "Buffer the cities", "instructions": "Analyze › Tools › Buffer", "command": "gp.run", "params": {"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near cities"}}},
+        {"title": "Zoom", "command": "layer.zoomTo", "params": {"layer": "Near cities"}},
+        {"title": "Clear", "command": "select.clear"}
+    ]});
+    s.run("task.import", &json!({"text": lesson.to_string()})).unwrap();
+    s.run("task.run", &json!({"task": "Lesson", "step": 0})).unwrap();
+    assert!(s.map().layer_by_name("Near cities").is_some());
+    let to_a_file = json!({"name": "To a file", "steps": [{"title": "Buffer", "command": "gp.run", "params": {"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "C:/temp/x.shp"}}}]});
+    assert!(s.run("task.import", &json!({"text": to_a_file.to_string()})).is_err());
+    assert!(crate::cmd::items::touches_files("gp.run", &json!({"tool": "buffer", "params": {"output": "../x.shp"}})));
+    assert!(!crate::cmd::items::touches_files("gp.run", &json!({"tool": "buffer", "params": {"output": "Near cities"}})));
+    // Only a plain layer name, only gp.run's, only for RustGIS's own tools.
+    for (command, params) in [
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "x.shp"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "sub/x"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": "sub\\x"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"output": ".bashrc"}})),
+        ("gp.run", json!({"tool": "geolibre:slope", "params": {"output": "slope"}})),
+        ("gp.run", json!({"tool": "plugin:kit/hex", "params": {"output": "hex"}})),
+        // Not one of RustGIS's own tools, even without a prefix.
+        ("gp.run", json!({"tool": "someOtherTool", "params": {"output": "x"}})),
+        ("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "nested": {"output": "x"}}})),
+        ("layer.rename", json!({"layer": "Cities", "output": "x"})),
+    ] {
+        assert!(crate::cmd::items::touches_files(command, &params), "{command} {params}");
+    }
+
+    // `"step": null` runs the whole task, as before; a step that isn't an index is refused.
+    s.run("select.all", &json!({"layer": "Cities"})).unwrap();
+    let r = s.run("task.run", &json!({"task": "Lesson", "step": null})).unwrap();
+    assert_eq!(r["ran"].as_array().unwrap().len(), 3);
+    assert!(s.run("task.run", &json!({"task": "Lesson", "step": "two"})).is_err());
+
+    // Steps are edited, moved and deleted, each one undoable.
+    s.run(
+        "task.editStep",
+        &json!({"task": "Lesson", "step": 1, "title": "  Look at it  ", "instructions": "Line one.
+Line two."}),
+    )
+    .unwrap();
+    let step = |s: &Session, i: usize| s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps[i].clone();
+    assert_eq!(
+        (step(&s, 1).title.as_str(), step(&s, 1).instructions.as_str()),
+        (
+            "Look at it",
+            "Line one.
+Line two."
+        )
+    );
+    assert_eq!(step(&s, 1).command, "layer.zoomTo", "editing keeps the command");
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1, "title": " "})).is_err());
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 9, "title": "x"})).is_err());
+    s.run("task.moveStep", &json!({"task": "Lesson", "step": 2, "to": 0})).unwrap();
+    assert_eq!(step(&s, 0).title, "Clear");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(step(&s, 0).title, "Buffer the cities");
+    s.run("task.removeStep", &json!({"task": "Lesson", "step": 2})).unwrap();
+    assert_eq!(s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps.len(), 2);
+    assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 0, "to": 5})).is_err());
+    // Neither changes nothing (which would leave an undo step).
+    let depth = s.undo_depth();
+    assert!(s.run("task.moveStep", &json!({"task": "Lesson", "step": 1, "to": 1})).is_err());
+    let bad = s.run("task.removeStep", &json!({"task": "Lesson", "step": -1})).unwrap_err();
+    assert!(bad.contains("whole number"), "{bad}");
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1})).is_err());
+    let same = s.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().steps[1].title.clone();
+    assert!(s.run("task.editStep", &json!({"task": "Lesson", "step": 1, "title": format!(" {same} ")})).is_err());
+    assert_eq!(s.undo_depth(), depth);
+    // Still a task from a file: a step that writes a file stays refused after editing.
+    assert!(!s.trusted_tasks.contains("lesson"));
+}
+
+#[test]
 fn globe_projection_toggles_renders_and_saves() {
     let mut s = with_raster();
     assert_eq!(s.run("map.projection", &Value::Null).unwrap()["projection"], "globe");

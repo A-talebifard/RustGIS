@@ -719,6 +719,228 @@ fn start_with_a_project_file_or_the_last_one() {
 }
 
 #[test]
+fn a_task_is_recorded_from_what_changes_the_project_and_edited_in_its_pane() {
+    let mut h = harness();
+    h.step();
+    let app = h.state_mut();
+    assert!(app.run("ui.taskRecord", json!({})).unwrap()["recording"].as_bool().unwrap());
+    // A colour dragged in its picker: one step, with the last colour.
+    for c in ["#112233", "#223344", "#336699"] {
+        app.run("layer.color", json!({"layer": "Lakes", "color": c})).unwrap();
+    }
+    // A command that names no layer, run twice, is two steps; so are two selections on one layer.
+    app.run("map.basemap", json!({"name": "ocean"})).unwrap();
+    app.run("map.basemap", json!({"name": "paper"})).unwrap();
+    app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1000000"})).unwrap();
+    app.run("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 5000000"})).unwrap();
+    // Picking the layer to work on isn't a step either.
+    app.run("layer.select", json!({"layer": "Lakes"})).unwrap();
+    // Neither panes nor the view are steps.
+    app.run("ui.pane.symbology", json!(null)).unwrap();
+    app.run("map.zoomIn", json!(null)).unwrap();
+    app.run("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100, "output": "Near"}})).unwrap();
+    app.run("layer.color", json!({"layer": "Near", "color": "#1B8A3A"})).unwrap();
+    let r = app.run("ui.taskRecord", json!({"name": "Lesson"})).unwrap();
+    assert_eq!(r["steps"], json!(7));
+    let task = app.session.project.tasks.iter().find(|t| t.name == "Lesson").unwrap().clone();
+    let commands: Vec<&str> = task.steps.iter().map(|s| s.command.as_str()).collect();
+    assert_eq!(
+        commands,
+        ["layer.color", "map.basemap", "map.basemap", "select.byAttributes", "select.byAttributes", "gp.run", "layer.color"]
+    );
+    assert_eq!(task.steps[5].title, "Buffer", "a tool's step has the tool's name");
+    assert_eq!(task.steps[0].params["color"], json!("#336699"));
+    // It opens in the Tasks pane, ready to edit.
+    assert_eq!(app.ui.right, Some(rustgis_ui_egui::RightPane::Tasks));
+    assert!(app.ws.task_editing && app.ws.task == "Lesson");
+    // The symbol editor sets the active layer's colour without naming it: the step names the
+    // layer, and a drag is one step.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.select", json!({"layer": "Lakes"})).unwrap();
+    for c in ["#101010", "#202020", "#303030"] {
+        app.run("layer.color", json!({"color": c})).unwrap();
+    }
+    let steps = app.ws.recording.clone().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!((steps[0].params["layer"].clone(), steps[0].params["color"].clone()), (json!("Lakes"), json!("#303030")));
+    app.ws.recording = None;
+    // So does any command run on the active layer, named as it was before the command ran (a
+    // rename changes it).
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.select", json!({"layer": "Rivers"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("layer.rename", json!({"name": "Streams"})).unwrap();
+    let steps = app.ws.recording.take().unwrap();
+    assert_eq!(steps.iter().map(|s| s.params["layer"].clone()).collect::<Vec<_>>(), [json!("Rivers"), json!("Rivers")]);
+    app.run("layer.rename", json!({"layer": "Streams", "name": "Rivers"})).unwrap();
+    // A command holding a token isn't recorded, and that is said; the same without one is a step.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("map.addTiles", json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png?access_token=pk.abc", "name": "Private"})).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+    assert!(app.session.notices.iter().any(|n| n.text.contains("password, key or token")));
+    app.run("map.addTiles", json!({"url": "https://tiles.example.com/{z}/{x}/{y}.png", "name": "Public"})).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    app.ws.recording = None;
+    // Undo while recording keeps the step, and says how to drop it.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    assert!(app.session.notices.iter().any(|n| n.text.contains("Edit Steps")));
+    // Past 200 steps nothing more is kept, and that is said once.
+    let given = app.session.notices.iter().filter(|n| n.error).count();
+    for i in 0..205 {
+        let layer = if i % 2 == 0 { "Rivers" } else { "Lakes" };
+        app.run("layer.color", json!({"layer": layer, "color": "#112233"})).unwrap();
+    }
+    assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(200));
+    assert_eq!(app.session.notices.iter().filter(|n| n.error).count(), given + 1, "one notice at the cap");
+    app.run("ui.taskRecord", json!({"name": "Long"})).unwrap();
+    assert_eq!(app.session.project.tasks.iter().find(|t| t.name == "Long").unwrap().steps.len(), 200);
+    app.run("task.remove", json!({"task": "Long"})).unwrap();
+    // Undo said once per recording.
+    let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("Edit Steps")).count();
+    let before = said(app);
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    app.run("layer.color", json!({"layer": "Rivers", "color": "#445566"})).unwrap();
+    app.run("edit.undo", json!(null)).unwrap();
+    assert_eq!(said(app), before + 1, "the undo notice once per recording");
+    app.ws.recording = None;
+    // Stopping with nothing recorded makes no task, and says so.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    assert_eq!(app.run("ui.taskRecord", json!({})).unwrap()["steps"], json!(0));
+    assert_eq!(app.session.project.tasks.len(), 1);
+    assert!(app.session.notices.iter().any(|n| n.text.contains("Nothing was recorded")));
+
+    // The pane draws while a step is being edited, and saving it keeps the new words.
+    h.state_mut().ws.task_edit = Some((
+        1,
+        "Buffer the cities".into(),
+        "Analyze › Tools › Buffer.
+Distance: 100 km."
+            .into(),
+    ));
+    h.step();
+    h.step();
+    let app = h.state_mut();
+    app.run(
+        "task.editStep",
+        json!({"task": "Lesson", "step": 1, "title": "Buffer the cities", "instructions": "Analyze › Tools › Buffer."}),
+    )
+    .unwrap();
+    assert_eq!(app.session.project.tasks[0].steps[1].title, "Buffer the cities");
+    // Unticking Edit Steps drops an unsaved edit; out of edit mode, a step runs from the pane.
+    app.ws.task_edit = Some((0, "Typed".into(), String::new()));
+    h.step();
+    h.get_by_label("Edit Steps").click();
+    h.step();
+    h.step();
+    let app = h.state_mut();
+    assert!(!app.ws.task_editing);
+    assert!(app.ws.task_edit.is_none(), "the unsaved edit is dropped");
+    // The name typed beside Stop Recording names the task.
+    let app = h.state_mut();
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#654321"})).unwrap();
+    app.ws.record_name = "Lake colours".into();
+    h.step();
+    h.step();
+    assert!(h.get_by_label("Stop Recording").rect().max.x <= 1400.0, "the name field leaves Stop Recording in the pane");
+    h.get_by_label("Stop Recording").click();
+    h.step();
+    h.step();
+    let app = h.state_mut();
+    assert!(app.ws.recording.is_none());
+    assert!(app.session.project.tasks.iter().any(|t| t.name == "Lake colours"));
+    // Opening another project ends a recording, and says so.
+    app.run("ui.taskRecord", json!({})).unwrap();
+    app.run("layer.color", json!({"layer": "Lakes", "color": "#123456"})).unwrap();
+    let errors = app.session.notices.iter().filter(|n| n.error).count();
+    app.run("project.new", json!(null)).unwrap();
+    assert!(app.ws.recording.is_none());
+    assert_eq!(app.session.notices.iter().filter(|n| n.error).count(), errors + 1);
+    assert!(app.session.project.tasks.is_empty(), "nothing recorded lands in the new project");
+}
+
+#[test]
+fn show_me_points_at_where_a_steps_command_is() {
+    use rustgis_ui_egui::RightPane;
+    use rustgis_ui_egui::rustgis_engine::project::TaskStep;
+    let step = |command: &str, params: serde_json::Value| TaskStep {
+        title: "x".into(),
+        instructions: String::new(),
+        command: command.into(),
+        params,
+    };
+    let mut h = harness();
+    h.step();
+    let show = |h: &mut egui_kittest::Harness<'static, RustGisApp>, st: TaskStep| {
+        h.state_mut().run("ui.taskShowMe", serde_json::to_value(&st).unwrap()).unwrap();
+        for _ in 0..6 {
+            h.step();
+        }
+    };
+    // A tool in the Analyze gallery: its tab, its button outlined, nothing opened for the user.
+    show(&mut h, step("gp.run", json!({"tool": "buffer", "params": {"input": "Cities", "distance": 100}})));
+    let app = h.state_mut();
+    assert_eq!(app.ui.tab, "Analyze");
+    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "the Buffer button is outlined");
+    assert_ne!(app.ui.right, Some(RightPane::Geoprocessing));
+    // With the ribbon minimized, Show Me opens it to outline the button.
+    h.state_mut().ui.ribbon_minimized = true;
+    show(&mut h, step("gp.run", json!({"tool": "buffer", "params": {}})));
+    assert!(h.state_mut().ui.show_me.as_ref().is_some_and(|s| s.found), "found on the peeked ribbon");
+    h.state_mut().ui.ribbon_minimized = false;
+    // A tool with no button on the ribbon opens, empty, in the Tools pane.
+    show(&mut h, step("gp.run", json!({"tool": "xyTableToPoint", "params": {}})));
+    assert_eq!(h.state_mut().ui.right, Some(RightPane::Geoprocessing));
+    // A command whose button opens a dialog: that button.
+    show(&mut h, step("select.byAttributes", json!({"layer": "Countries", "where": "pop_est > 1"})));
+    let app = h.state_mut();
+    assert_eq!(app.ui.tab, "Home");
+    assert!(app.ui.show_me.as_ref().is_some_and(|s| s.found), "Select By Attributes is outlined");
+    // A command no ribbon button runs: Command Search on its name.
+    h.state_mut().ui.command_search = None;
+    show(&mut h, step("layer.zoomTo", json!({"layer": "Lakes"})));
+    assert!(h.state_mut().ui.command_search.is_some());
+    h.state_mut().ui.command_search = None;
+    // Symbology: the Symbology pane, on the step's layer.
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    assert_eq!(h.state_mut().ui.right, Some(RightPane::Symbology));
+    // A Layers filter hiding the step's layer is cleared, so the layer stays active.
+    h.state_mut().ui.layer_filter = "Riv".into();
+    h.step();
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    let app = h.state_mut();
+    let lakes = app.session.map().layer_by_name("Lakes").unwrap().id;
+    assert_eq!(app.session.active_layer, Some(lakes), "Lakes stays active");
+    assert!(app.ui.layer_filter.is_empty());
+    // A tool step that names no tool says so, and opens nothing.
+    h.state_mut().ui.right = None;
+    let said = h.state_mut().run("ui.taskShowMe", json!({"command": "gp.run", "params": {}})).unwrap();
+    assert!(said["said"].as_str().unwrap().contains("names no tool"));
+    assert_eq!(h.state_mut().ui.right, None);
+    // A step whose layer isn't in the map says so, and opens nothing.
+    h.state_mut().ui.right = None;
+    let said =
+        h.state_mut().run("ui.taskShowMe", json!({"command": "layer.color", "params": {"layer": "Gone", "color": "#336699"}})).unwrap();
+    assert!(said["said"].as_str().unwrap().contains("Gone"));
+    assert_eq!(h.state_mut().ui.right, None);
+    // A null layer is the active one: Symbology opens on it.
+    let said =
+        h.state_mut().run("ui.taskShowMe", json!({"command": "layer.color", "params": {"layer": null, "color": "#336699"}})).unwrap();
+    assert!(!said["said"].as_str().unwrap().contains("null"));
+    assert_eq!(h.state_mut().ui.right, Some(RightPane::Symbology));
+    h.state_mut().ui.right = None;
+    // Nothing is done for the user: Show Me leaves the layer as it was.
+    let before = format!("{:?}", h.state_mut().session.map().layer_by_name("Lakes").unwrap().renderer);
+    show(&mut h, step("layer.color", json!({"layer": "Lakes", "color": "#336699"})));
+    assert_eq!(format!("{:?}", h.state_mut().session.map().layer_by_name("Lakes").unwrap().renderer), before);
+}
+
+#[test]
 fn old_and_unknown_tab_names_open_a_current_tab() {
     let mut h = harness();
     for (asked, opened) in [("Imagery", "Analyze"), ("Feature Layer", "Style"), ("Share", "Publish"), ("Map", "Home"), ("nope", "Home")] {

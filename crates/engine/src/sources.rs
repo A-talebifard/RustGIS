@@ -211,6 +211,11 @@ fn secret_key(k: &str) -> bool {
             | "sig"
             | "signature"
             | "sas"
+            | "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "bearer"
     ) || k.starts_with("x-amz-")
         || k.starts_with("x-goog-")
         || k.contains("password")
@@ -229,6 +234,66 @@ fn secret_in(k: &str, keys: &[String]) -> bool {
     let k = k.to_ascii_lowercase();
     let has = |x: &str| keys.iter().any(|q| q == x);
     secret_key(&k) || (has("sig") && has("sv") && SAS_KEYS.contains(&k.as_str())) || (k == "code" && has("state"))
+}
+
+/// Whether command parameters hold something that gives access: a non-empty value under a key
+/// that names a password, key, secret or token ([`secret_key`]), or an address or PostgreSQL
+/// connection that [`redact`] would change. Recording a task leaves such a command out, since a
+/// task is saved with the project and shared as a file.
+pub fn holds_secret(params: &serde_json::Value) -> bool {
+    // A PEM private key (`-----BEGIN … PRIVATE KEY-----`), wherever it was pasted.
+    fn private_key(t: &str) -> bool {
+        t.contains("PRIVATE KEY-----")
+    }
+    fn walk(v: &serde_json::Value, depth: usize) -> bool {
+        use serde_json::Value;
+        match v {
+            Value::Object(o) if depth < 16 => o.iter().any(|(k, v)| {
+                // A switch (`"token": false`) holds no secret; a number might (a PIN).
+                let filled = match v {
+                    Value::String(t) => !t.trim().is_empty(),
+                    Value::Null | Value::Bool(_) => false,
+                    Value::Object(o) => !o.is_empty(),
+                    Value::Array(a) => !a.is_empty(),
+                    Value::Number(_) => true,
+                };
+                // A bare `key` beside a web address is that service's key; elsewhere it's as likely
+                // a field or a lookup key (a `?key=…` in an address `redact` reads in the string).
+                let beside_address =
+                    || o.values().any(|v| v.as_str().is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("http")));
+                // A file's contents (Add Data's `data`, a GeoJSON `text`) isn't an address to read
+                // through, only checked for a private key pasted in.
+                let contents = matches!(k.to_ascii_lowercase().as_str(), "data" | "text");
+                let inside = match v {
+                    // (Short ones, which can't be much of a file, are read as any string.)
+                    Value::String(t) if contents && t.len() > 1024 => private_key(t),
+                    _ => walk(v, depth + 1),
+                };
+                (secret_key(k) && (!k.eq_ignore_ascii_case("key") || beside_address()) && filled) || inside
+            }),
+            Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
+            Value::Object(_) | Value::Array(_) => true,
+            Value::String(t) => private_key(t) || redact(t) != *t,
+            _ => false,
+        }
+    }
+    walk(params, 0)
+}
+
+/// Whether command parameters set a plain `key` (at any depth), which [`holds_secret`] lets
+/// through: as often a field or a lookup key as an access key, so a recording keeps it and says so.
+pub fn holds_plain_key(params: &serde_json::Value) -> bool {
+    fn walk(v: &serde_json::Value, depth: usize) -> bool {
+        use serde_json::Value;
+        match v {
+            Value::Object(o) if depth < 16 => o
+                .iter()
+                .any(|(k, v)| (k.eq_ignore_ascii_case("key") && v.as_str().is_some_and(|t| !t.trim().is_empty())) || walk(v, depth + 1)),
+            Value::Array(a) if depth < 16 => a.iter().any(|v| walk(v, depth + 1)),
+            _ => false,
+        }
+    }
+    walk(params, 0)
 }
 
 /// An address without what would give someone else the user's access: the user and password of
@@ -388,6 +453,48 @@ fn build_library() -> Vec<(&'static str, Source)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_in_command_parameters_are_noticed() {
+        use serde_json::json;
+        for p in [
+            json!({"database": "postgres:host=db dbname=gis user=ana", "password": "s3cret"}),
+            json!({"database": "postgres:host=db dbname=gis user=ana password=s3cret"}),
+            json!({"url": "https://ana:s3cret@example.com/data.geojson"}),
+            json!({"url": "https://example.com/tiles/{z}/{x}/{y}.png?access_token=pk.abc"}),
+            json!({"url": "https://maps.example.com/tiles/{z}/{x}/{y}.png?key=abc"}),
+            json!({"url": "https://api.example.com/tiles", "key": "abc"}),
+            json!({"source": {"headers": {"X-API-Key": "abc"}}}),
+            json!({"url": "https://example.com/data.geojson", "headers": {"Authorization": "Bearer abc"}}),
+            json!({"headers": {"Cookie": "session=abc"}}),
+            json!({"text": "https://ana:s3cret@example.com/x"}),
+            json!({"url": format!("https://example.com/{}?sig=abc&sv=2024", "a".repeat(10_000))}),
+            json!({"certificate": "-----BEGIN RSA PRIVATE KEY-----
+MIIE
+-----END RSA PRIVATE KEY-----"}),
+        ] {
+            assert!(holds_secret(&p), "{p}");
+        }
+        for p in [
+            json!({"layer": "Lakes", "color": "#336699"}),
+            json!({"tool": "buffer", "params": {"input": "rivers", "distance": 30, "output": "APP"}}),
+            json!({"url": "https://example.com/data.geojson"}),
+            json!({"database": "postgres:host=db dbname=gis user=ana", "password": ""}),
+            json!({"url": "https://example.com/data.geojson", "token": false}),
+            json!({"token": {}, "password": []}),
+            json!({"layer": "Parcels", "key": "parcel_id"}),
+            json!({"fileName": "big.geojson", "data": "A".repeat(100_000)}),
+            // A file's contents, past what an address could be, isn't read as one.
+            json!({"fileName": "a.geojson", "text": format!("{{\"type\": \"FeatureCollection\", \"note\": \"https://x.example/?token=t\", \"pad\": \"{}\"}}", "x".repeat(2000))}),
+        ] {
+            assert!(!holds_secret(&p), "{p}");
+        }
+        // A plain key is let through, and noticed so the user is told.
+        assert!(holds_plain_key(&json!({"layer": "Parcels", "key": "parcel_id"})));
+        assert!(holds_plain_key(&json!({"source": [{"key": "abc"}]})));
+        assert!(!holds_plain_key(&json!({"layer": "Parcels", "key": ""})));
+        assert!(!holds_plain_key(&json!({"api_key": "abc"})));
+    }
 
     #[test]
     fn postgres_connections_lose_every_secret() {

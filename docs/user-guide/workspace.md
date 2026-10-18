@@ -6,9 +6,38 @@ Tools for working across maps and views, and for setting up the app the way you 
   place and scale, and **Link Cursors** marks the pointer's place on the other map.
 - **Browser View** shows the project's maps, layouts, tables, styles, tasks, models, folders and
   offline areas as cards (double-click to open); **Item Pop-ups** add hover details.
-- **Pane Sets** save the panes you have open and bring them back. **Tasks** steps through a
-  task's instructions; the **Workflow Manager** tracks jobs (new, in progress, on hold, done)
-  with the area each covers.
+- **Pane Sets** save the panes you have open and bring them back. The **Workflow Manager** tracks
+  jobs (new, in progress, on hold, done) with the area each covers.
+- **Tasks** (Analyze › Tasks, or View › Tasks) steps through a task's instructions: read the current step and do it
+  yourself, with **Show Me** to find where, or click **Run** to have it done.
+  - **Show Me** points at the step's command:
+    - a ribbon button gets its tab opened and is outlined for a few seconds;
+    - a tool is outlined in the Analyze gallery, or opened, empty, in the Tools pane;
+    - a symbology step opens the Symbology pane on its layer;
+    - a command no button runs opens Command Search on its name.
+  - **Record Task** (in the pane, or Analyze › Task) turns an exercise into a task: do it once, and
+    each command that changes the project becomes a step. Panes, dialogs and moving the view
+    aren't recorded, and a colour adjusted several times stays one step. **Stop Recording** makes
+    the task, named as typed beside it, and opens it for editing. Opening or creating another
+    project ends a recording without making a task.
+    - Undo doesn't remove a recorded step; delete it with Edit Steps.
+    - A task holds at most 200 steps, and a step's parameters at most 4 MB: add large data to
+      the project before recording.
+    - Steps keep their parameters as they ran, file paths included (a file you added, say), so
+      check them before sharing a task. A command run on the selected layer names it, so the
+      step replays on that layer whichever is selected then; where two layers share a name it
+      replays on the first, so rename one first (the recording says so). A command holding a password, key or token (a database
+      connection, a signed address) isn't recorded, nor is data added from a download, which is
+      kept for the session only.
+  - **Edit Steps** gives each step ▲ ▼ to reorder it, **Edit** for its title and instructions, and
+    **Delete**. A recorded tool's step is named after the tool.
+  - In the Browser pane, a click on a task opens its steps; **Run All Steps** is in its context
+    menu.
+  - A task from a file (`.rgistask`, or inside a project or a package) can't read or write files
+    or run scripts. Its built-in analysis tools may still name their output layers with a plain
+    name: one with `/`, `\`, `.` or `:` (a folder, an extension or a drive) makes the task count
+    as writing files, so write `Buffer 1500 m` rather than `Buffer 1.5 km`. GeoLibre and plugin
+    tools' outputs are refused.
 - **Thumbnails** for the project and for each map, from the view or an image.
 - **Animation**: add keyframes (views), play them, and export the moves as PNG frames.
 - **Profile**: elevation profiles along clicked points or selected lines, auto-completed to the

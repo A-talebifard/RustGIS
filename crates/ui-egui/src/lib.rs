@@ -43,6 +43,7 @@ mod ribbon;
 mod s3ui;
 mod searchbox;
 mod serviceui;
+mod showme;
 mod sourcespane;
 mod sqlpane;
 mod stacui;
@@ -405,6 +406,8 @@ pub struct UiState {
     /// A minimized ribbon temporarily opened from its tab strip.
     pub ribbon_peek: bool,
     pub command_search: Option<String>,
+    /// A ribbon button being shown by a task step's Show Me.
+    pub show_me: Option<showme::ShowMe>,
     pub about: bool,
     pub shortcuts: bool,
     pub tab_strip_rect: Option<egui::Rect>,
@@ -549,6 +552,7 @@ impl Default for UiState {
             ribbon_minimized: false,
             ribbon_peek: false,
             command_search: None,
+            show_me: None,
             about: false,
             shortcuts: false,
             tab_strip_rect: None,
@@ -1203,6 +1207,18 @@ impl RustGisApp {
         if !matches!(id, "ui.menu" | "ui.ribbon" | "ui.language" | "ui.worldview") {
             self.ui.ribbon_peek = false;
         }
+        // Read before the command runs: removing or renaming the active layer changes it.
+        let active = if self.ws.recording.is_some() { self.layer_acted_on(id, &params) } else { None };
+        // A step being edited is known by its place in the task: Undo or Redo of a move or a
+        // deletion would leave that place naming another step.
+        // What is compared: the task's length and the step at the edit's place (its words and
+        // command, not its parameters, which may be large).
+        let task_steps = |app: &Self| {
+            let task = app.session.project.tasks.iter().find(|t| t.name == app.ws.task)?;
+            let at = app.ws.task_edit.as_ref().and_then(|e| task.steps.get(e.0));
+            Some((task.steps.len(), at.map(|s| (s.title.clone(), s.instructions.clone(), s.command.clone()))))
+        };
+        let steps_before = (matches!(id, "edit.undo" | "edit.redo") && self.ws.task_edit.is_some()).then(|| task_steps(self)).flatten();
         let r = if id.starts_with("ui.") { self.run_ui(id, &params) } else { self.session.run(id, &params) };
         if let Err(e) = &r {
             log::info!("{id}: {e}");
@@ -1213,21 +1229,209 @@ impl RustGisApp {
             self.ui.web_file = None;
             // A deletion asked for in the old project never reaches a namesake in the new one.
             self.map.deleting = None;
+            // A recording's steps name the old project's layers: it ends here, and says so.
+            if let Some(steps) = self.ws.recording.take() {
+                let n = steps.len().to_string();
+                let text = crate::i18n::fmt(
+                    "Recording stopped: another project opened, and its {n} steps were for the previous one.",
+                    &[("n", &n)],
+                );
+                self.session.notify(text, true);
+            }
         }
         // Undo and redo can move vertices: an index chosen before may now name another vertex.
+        // A step moved or deleted, from the pane, Command Search, the assistant or a script: the
+        // step being edited (and the current one) follow it, so Save writes where it was typed.
+        if r.is_ok() && matches!(id, "task.moveStep" | "task.removeStep") {
+            let tasks = &self.session.project.tasks;
+            // The task it acted on, as the command reads it: named, else the last one.
+            let acted = match params.get("task").and_then(Value::as_str) {
+                Some(n) => tasks.iter().find(|t| t.name.eq_ignore_ascii_case(n)),
+                None => tasks.last(),
+            };
+            let index = |k: &str| params.get(k).and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+            if acted.is_some_and(|t| t.name == self.ws.task)
+                && let Some(step) = index("step")
+            {
+                match index("to") {
+                    Some(to) if id == "task.moveStep" => workspacepanes::follow_move(self, step, to),
+                    _ if id == "task.removeStep" => workspacepanes::follow_delete(self, step),
+                    _ => {}
+                }
+            }
+        }
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
+            if let Some(before) = steps_before
+                && task_steps(self).is_none_or(|now| now != before)
+            {
+                self.ws.task_edit = None;
+                self.session.notify(tl!("The task's steps changed, so the step being edited was closed: edit it again."), false);
+            }
+            let n = self.session.project.tasks.iter().find(|t| t.name == self.ws.task).map_or(0, |t| t.steps.len());
+            self.ws.task_step = self.ws.task_step.min(n.saturating_sub(1));
         }
         // Choosing a tool, Text included, drops a value picked under Dynamic Text
         // (`ui.dynamicText` picks it after choosing the tool).
         if r.is_ok() && id == "tool.set" {
             self.ui.dynamic_text = None;
         }
+        if r.is_ok() {
+            self.record_step(id, &params, active);
+        }
         self.note_last_project();
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
         self.save_raster_defaults();
         r
+    }
+
+    /// The name of the active layer, when command `id` would act on it for want of a `layer`
+    /// (an `enabled` predicate gets the session shared, `&Session`, so asking twice changes
+    /// nothing; what it says when disabled doesn't matter here):
+    /// it takes a `layer` and needs an active one to be enabled, or is one of those that
+    /// default to it while enabled without one. Elsewhere `layer` names something else (a file's
+    /// layer for Add Data, a service's), and a layer the command names is its own.
+    /// Also whether another layer has that name, so the step would replay on the first of them.
+    fn layer_acted_on(&mut self, id: &str, params: &Value) -> Option<(String, bool)> {
+        let spec = self.session.registry.get(id).filter(|c| c.mutates && params.get("layer").is_none_or(Value::is_null)).copied()?;
+        if !spec.param_keys().is_some_and(|k| k.contains(&"layer")) {
+            return None;
+        }
+        let defaults = DEFAULTS_TO_ACTIVE_LAYER.contains(&id);
+        let active = self.session.active_layer.take();
+        let needs = (spec.enabled)(&self.session).is_some();
+        self.session.active_layer = active;
+        if !defaults && !(needs && (spec.enabled)(&self.session).is_none()) {
+            return None;
+        }
+        let map = self.session.map();
+        let name = active.and_then(|l| map.layer(l)).map(|l| l.name.clone())?;
+        let shared = map.layers.iter().filter(|l| l.name.eq_ignore_ascii_case(&name)).count() > 1;
+        Some((name, shared))
+    }
+
+    /// Record Task: adds a command that ran from the app and changed the project as a step. Not
+    /// panes and dialogs (`ui.*`), tasks themselves, or what only moves the view. A colour, outline
+    /// or transparency set again on the same layer (dragged in its picker) updates the step it just
+    /// made.
+    /// `active` is the active layer's name from [`Self::layer_acted_on`], read before it ran.
+    fn record_step(&mut self, id: &str, params: &Value, active: Option<(String, bool)>) {
+        let Some(steps) = self.ws.recording.as_mut() else { return };
+        // Undo doesn't take back a recorded step (the undo history and the recording don't line
+        // up step for step): say how to.
+        if id == "edit.undo" && !steps.is_empty() {
+            if !self.ws.recording_undo_said {
+                self.ws.recording_undo_said = true;
+                self.session.notify(tl!("Undo doesn't remove the recorded step: delete it in Edit Steps once you stop recording."), false);
+            }
+            return;
+        }
+        // Not steps of an exercise: panes, tasks, opening or saving the project, undo and redo,
+        // and picking the layer to work on (a click in the Layers pane).
+        if id.starts_with("ui.")
+            || id.starts_with("task.")
+            || id.starts_with("project.")
+            || matches!(id, "edit.undo" | "edit.redo" | "layer.select")
+        {
+            return;
+        }
+        let Some(spec) = self.session.registry.get(id).filter(|c| c.mutates).copied() else { return };
+        // Downloaded data is kept for this session only, and adding it uses it up: a task
+        // couldn't add it again.
+        if id == "layer.addDownload" {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: the downloaded data is kept for this session only, so a task couldn't add it again.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
+        // A task is saved with the project and shared as a file: a command holding a password,
+        // key or token (a database connection, a signed address) isn't recorded.
+        if rustgis_engine::sources::holds_secret(params) {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: its parameters may hold a password, key or token (one is named like it, an address carries one, or they nest too deep to check), and a task would keep it.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
+        // A task keeps its steps' parameters in the project: one carrying megabytes (a file's
+        // contents added from the app) would swell every save of it.
+        if serde_json::to_vec(params).map_or(0, |b| b.len()) > MAX_STEP_BYTES {
+            let text = crate::i18n::fmt(
+                "{command} isn't recorded: its parameters are over 4 MB, too much for a task to keep. Add that data to the project before recording.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+            return;
+        }
+        // A plain `key` is kept (a field or a lookup key, as often as not), but it might be an
+        // access key: said once a recording.
+        if rustgis_engine::sources::holds_plain_key(params) && !self.ws.recording_key_said {
+            self.ws.recording_key_said = true;
+            let text = crate::i18n::fmt(
+                "{command}'s step keeps its key parameter. If that is an access key, delete the step (Edit Steps) before sharing the task.",
+                &[("command", tl!(spec.label))],
+            );
+            self.session.notify(text, false);
+        }
+        // The ribbon, the symbol editor and the panes run a command on the active layer without
+        // naming it: the step names it (`active`, from `layer_acted_on`), so it replays on that
+        // layer, not on whichever is active then, and a colour dragged merges into one step.
+        let mut params = params.clone();
+        if let Some((name, shared)) = active {
+            // Steps name layers, and a name two layers share replays on the first: say so, once
+            // a recording for each name.
+            if shared && !self.ws.recording_shared_said.contains(&name) {
+                let text = crate::i18n::fmt(
+                    "Two layers are named {name}: the step names it, so it replays on the first of them. Rename one to tell them apart.",
+                    &[("name", &name)],
+                );
+                self.session.notify(text, false);
+                self.ws.recording_shared_said.push(name.clone());
+            }
+            if params.is_null() {
+                params = json!({});
+            }
+            if let Some(object) = params.as_object_mut() {
+                object.insert("layer".into(), json!(name));
+            }
+        }
+        let params = &params;
+        // Only a setting adjusted again and again on one layer (a colour dragged in its picker)
+        // updates its step; anything else, a second selection on the same layer included, is a
+        // step of its own.
+        if let Some(last) = steps.last_mut()
+            && matches!(id, "layer.color" | "layer.outline" | "layer.transparency")
+            && last.command == id
+            && params.get("layer").is_some()
+            && last.params.get("layer") == params.get("layer")
+        {
+            last.params = params.clone();
+            return;
+        }
+        // A tool's step is titled with the tool's name ("Buffer"), not "Run Tool".
+        let title = match params.get("tool").and_then(Value::as_str).and_then(rustgis_engine::analysis::tool) {
+            Some(tool) if id == "gp.run" => tl!(tool.name).to_string(),
+            _ => tl!(spec.label).to_string(),
+        };
+        if steps.len() >= 200 {
+            // A task holds at most 200 steps: say so once, when the first one is left out.
+            if !self.ws.recording_full {
+                self.ws.recording_full = true;
+                self.session
+                    .notify(tl!("A task holds at most 200 steps: stop recording to make it, then record the rest as another task."), true);
+            }
+            return;
+        }
+        steps.push(rustgis_engine::project::TaskStep {
+            title,
+            instructions: String::new(),
+            command: id.to_string(),
+            params: params.clone(),
+        });
     }
 
     /// Keeps the default raster style with the preferences when it changed.
@@ -1954,6 +2158,53 @@ impl RustGisApp {
                 }
             }
             "ui.pane.tasks" => toggle_right(&mut self.ui, RightPane::Tasks),
+            // Show Me for a task step (`{"command", "params"?}`): where its command is.
+            "ui.taskShowMe" => {
+                let st: rustgis_engine::project::TaskStep = serde_json::from_value(json!({
+                    "title": p.get("title").cloned().unwrap_or(json!("")),
+                    "command": p.get("command").cloned().unwrap_or(Value::Null),
+                    "params": p.get("params").cloned().unwrap_or(Value::Null),
+                }))
+                .map_err(|e| format!("a step needs a command: {e}"))?;
+                return Ok(json!({"said": showme::start(self, &st)}));
+            }
+            // Record Task: starts recording, or stops and makes the task (named `name`, else
+            // "Recorded Task"). Says whether it is recording and how many steps it has.
+            "ui.taskRecord" => match self.ws.recording.take() {
+                None => {
+                    self.ws.recording = Some(Vec::new());
+                    self.ws.recording_full = false;
+                    self.ws.recording_undo_said = false;
+                    self.ws.recording_shared_said.clear();
+                    self.ws.recording_key_said = false;
+                    self.ws.record_name.clear();
+                    return Ok(json!({"recording": true, "steps": 0}));
+                }
+                Some(steps) if steps.is_empty() => {
+                    self.session.notify(tl!("Nothing was recorded, so no task was made."), false);
+                    return Ok(json!({"recording": false, "steps": 0}));
+                }
+                Some(steps) => {
+                    let name = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Recorded Task");
+                    let n = steps.len();
+                    let r = match self.session.run("task.new", &json!({"name": name, "steps": &steps})) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // The exercise stays recorded: stopping again tries again.
+                            self.ws.recording = Some(steps);
+                            return Err(e);
+                        }
+                    };
+                    if let Some(task) = r.get("task").and_then(Value::as_str) {
+                        self.ws.task = task.to_string();
+                        self.ws.task_step = 0;
+                        self.ws.task_edit = None;
+                        self.ws.task_editing = true;
+                    }
+                    self.ui.right = Some(RightPane::Tasks);
+                    return Ok(json!({"recording": false, "steps": n, "task": r.get("task")}));
+                }
+            },
             "ui.pane.jobs" => toggle_right(&mut self.ui, RightPane::Jobs),
             "ui.pane.profile" => toggle_right(&mut self.ui, RightPane::Profile),
             "ui.pane.diagnostics" => toggle_right(&mut self.ui, RightPane::Diagnostics),
@@ -2744,6 +2995,7 @@ impl RustGisApp {
         mapview::confirm_delete(self, &ctx);
         pluginsui::show(self, &ctx);
         update::show(self, &ctx);
+        showme::tick(self, &ctx);
         chrome::command_search(self, &ctx);
         chrome::about(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -2838,6 +3090,159 @@ mod service_text_tests {
         }
         let valid = "{\"title\":\"Café\"}";
         assert!(super::service_text(valid.as_bytes().to_vec()).is_ok_and(|text| text == valid));
+    }
+}
+
+/// The most a recorded step's parameters may hold, serialized.
+const MAX_STEP_BYTES: usize = 4 << 20;
+
+/// Commands that act on the active layer when given no `layer`, though they are enabled without
+/// one (so [`RustGisApp::layer_acted_on`] can't tell from their `enabled`). A command added with
+/// an optional `layer` that defaults to the active layer goes here, so a recorded step names it;
+/// `record_tests::every_optional_layer_is_classified` fails until it is placed here or there.
+const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
+    "select.byAttributes",
+    "select.rows",
+    "select.layerFromSelection",
+    "data.similar",
+    "layer.geocode",
+    "report.new",
+    "report.open",
+    "share.webLayer",
+    "share.webStyle",
+    "share.locator",
+];
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod record_tests {
+    use super::{DEFAULTS_TO_ACTIVE_LAYER, RustGisApp};
+    use serde_json::json;
+
+    /// Every command with an optional `layer` either needs an active layer to be enabled, defaults
+    /// to it (`DEFAULTS_TO_ACTIVE_LAYER`), or reads `layer` as something else: a recorded step
+    /// names the active layer for the first two only.
+    #[test]
+    fn every_optional_layer_is_classified() {
+        // `layer` is a file's or a service's, the graphics layer drawn on (the active one only if
+        // it is a graphics layer), a layout element's, or the one a report or web layer had.
+        // Needs a layer read in place from its file, which the sample has none of; it acts on it.
+        const NEEDS_A_STREAMED_LAYER: &[&str] = &["layer.loadAll"];
+        const SOMETHING_ELSE: &[&str] = &[
+            "service.refresh",
+            "service.group",
+            "layer.addData",
+            "layer.addDatabase",
+            "layer.addUrl",
+            "layer.addDownload",
+            "layer.addDataBytes",
+            "portal.add",
+            "graphics.add",
+            "layout.addElement",
+            "layout.update",
+            "layout.frameZoom",
+            "report.update",
+            "share.replaceWebLayer",
+        ];
+        let mut app = RustGisApp::with_sample();
+        // A raster too, for the commands that need one active (a 2×2 ASCII grid).
+        let grid = "bmNvbHMgMgpucm93cyAyCnhsbGNvcm5lciAwCnlsbGNvcm5lciAwCmNlbGxzaXplIDEKTk9EQVRBX3ZhbHVlIC05OTk5CjEgMgozIDQK";
+        app.session.run("layer.addDataBytes", &json!({"fileName": "grid.asc", "data": grid})).unwrap();
+        let layers: Vec<u32> = app.session.map().layers.iter().map(|l| l.id).collect();
+        // As `layer_acted_on` tells, whatever its message says: enabled with some layer active,
+        // and not with none.
+        let mut needs_active = |c: &rustgis_engine::CommandSpec| {
+            app.session.active_layer = None;
+            if (c.enabled)(&app.session).is_none() {
+                return false;
+            }
+            let some = layers.iter().any(|&l| {
+                app.session.active_layer = Some(l);
+                (c.enabled)(&app.session).is_none()
+            });
+            app.session.active_layer = None;
+            some
+        };
+        let unplaced: Vec<_> = rustgis_engine::cmd::all()
+            .into_iter()
+            .filter(|c| c.mutates && c.params.contains(r#""layer"?"#))
+            .filter(|c| !needs_active(c))
+            .filter(|c| ![DEFAULTS_TO_ACTIVE_LAYER, SOMETHING_ELSE, NEEDS_A_STREAMED_LAYER].iter().any(|list| list.contains(&c.id)))
+            .map(|c| c.id)
+            .collect();
+        assert!(unplaced.is_empty(), "say whether these act on the active layer: {unplaced:?}");
+    }
+
+    /// Undo or Redo that moves a task's steps closes the step being edited, so Save can't write
+    /// its text into another step; one that leaves the steps alone keeps it open.
+    #[test]
+    fn undoing_a_step_move_closes_the_step_being_edited() {
+        let mut app = RustGisApp::with_sample();
+        let step = |t: &str| json!({"title": t, "command": "map.zoomFull", "params": {}});
+        app.run("task.new", json!({"name": "Lesson", "steps": [step("One"), step("Two")]})).unwrap();
+        app.ws.task = "Lesson".into();
+        app.run("layer.color", json!({"layer": "Lakes", "color": "#123456"})).unwrap();
+        app.ws.task_edit = Some((1, "Two".into(), "Typed".into()));
+        app.run("edit.undo", json!(null)).unwrap();
+        assert!(app.ws.task_edit.is_some(), "a colour undone leaves the steps alone");
+        // Run from anywhere (here, as Command Search would), the move takes the edit with it.
+        app.run("task.moveStep", json!({"task": "Lesson", "step": 1, "to": 0})).unwrap();
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        app.run("edit.undo", json!(null)).unwrap();
+        assert!(app.ws.task_edit.is_none(), "the edit's place now names another step");
+        assert!(app.session.notices.iter().any(|n| n.text.contains("step being edited was closed")));
+    }
+
+    /// A step whose parameters would swell the task isn't recorded, and that is said.
+    #[test]
+    fn a_step_over_the_size_limit_isnt_recorded() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        let big = "A".repeat(super::MAX_STEP_BYTES + 1);
+        app.record_step("layer.addDataBytes", &json!({"fileName": "big.geojson", "data": big}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+        assert!(app.session.notices.iter().any(|n| n.text.contains("over 4 MB")));
+        app.record_step("layer.addDataBytes", &json!({"fileName": "small.geojson", "data": "AAAA"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
+    }
+
+    /// A step keeping a plain `key` is recorded, and that is said once a recording.
+    #[test]
+    fn a_kept_key_is_said_once() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456", "key": "a"}), None);
+        app.record_step("layer.color", &json!({"layer": "Rivers", "color": "#123456", "key": "b"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(2));
+        assert_eq!(app.session.notices.iter().filter(|n| n.text.contains("keeps its key parameter")).count(), 1);
+    }
+
+    /// A step naming a layer whose name another layer shares says so, once for the name.
+    #[test]
+    fn a_shared_layer_name_is_said_once() {
+        let mut app = RustGisApp::with_sample();
+        let rivers = app.session.map().layer_by_name("Rivers").unwrap().id;
+        app.session.map_mut().layers.iter_mut().find(|l| l.id == rivers).unwrap().name = "Lakes".into();
+        app.run("layer.select", json!({"layer": rivers})).unwrap();
+        app.run("ui.taskRecord", json!({})).unwrap();
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("Two layers are named Lakes")).count();
+        app.run("layer.color", json!({"color": "#123456"})).unwrap();
+        app.run("layer.visibility", json!({})).unwrap();
+        assert_eq!(app.ws.recording.as_ref().unwrap()[0].params["layer"], json!("Lakes"));
+        assert_eq!(said(&app), 1);
+    }
+
+    /// Data added from a download isn't a step: its download is used up, so a task couldn't
+    /// add it again.
+    #[test]
+    fn downloaded_data_isnt_recorded() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.recording = Some(Vec::new());
+        app.record_step("layer.addDownload", &json!({"id": 1, "url": "https://example.com/rivers.geojson"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(0));
+        assert!(app.session.notices.iter().any(|n| n.text.contains("session only")));
+        app.record_step("layer.color", &json!({"layer": "Lakes", "color": "#123456"}), None);
+        assert_eq!(app.ws.recording.as_ref().map(Vec::len), Some(1));
     }
 }
 

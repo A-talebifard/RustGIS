@@ -12,6 +12,22 @@ use crate::theme::{Tokens, regular, semibold};
 pub struct WorkspaceState {
     pub task: String,
     pub task_step: usize,
+    /// The steps recorded so far while Record Task is on.
+    pub recording: Option<Vec<rustgis_engine::project::TaskStep>>,
+    /// The recording reached a task's 200 steps (and said so).
+    pub recording_full: bool,
+    /// The recording said that Undo keeps a recorded step.
+    pub recording_undo_said: bool,
+    /// Layer names the recording said two layers share.
+    pub recording_shared_said: Vec<String>,
+    /// The recording said a step keeps a `key` parameter.
+    pub recording_key_said: bool,
+    /// The name typed for the task being recorded.
+    pub record_name: String,
+    /// The Tasks pane shows its editing controls.
+    pub task_editing: bool,
+    /// The step being edited: its index, title and instructions as typed so far.
+    pub task_edit: Option<(usize, String, String)>,
     pub job_name: String,
     pub profile_layer: String,
     pub profile_lines: String,
@@ -57,57 +73,208 @@ fn run(app: &mut RustGisApp, id: &str, p: Value) -> Option<Value> {
     }
 }
 
-/// Tasks: pick one, read each step's instructions and run it.
-pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, _t: &Tokens) {
+/// After step `from` moves to `to` (as `task.moveStep` does), the step being edited (and the
+/// current one) keep pointing at the same steps, so Save writes the text where it was typed: the
+/// moved step is at `to`, and those it passed shift by one towards `from`.
+pub fn follow_move(app: &mut RustGisApp, from: usize, to: usize) {
+    let swap = |i: usize| {
+        if i == from {
+            to
+        } else if from < to && (from + 1..=to).contains(&i) {
+            i - 1
+        } else if to < from && (to..from).contains(&i) {
+            i + 1
+        } else {
+            i
+        }
+    };
+    if let Some(edit) = app.ws.task_edit.as_mut() {
+        edit.0 = swap(edit.0);
+    }
+    app.ws.task_step = swap(app.ws.task_step);
+}
+
+/// After a step is deleted: an edit open on it closes, one open on a later step (and the current
+/// step) moves up with it, so typed text stays with its step.
+pub fn follow_delete(app: &mut RustGisApp, deleted: usize) {
+    match app.ws.task_edit.as_ref().map(|e| e.0) {
+        Some(e) if e == deleted => app.ws.task_edit = None,
+        Some(e) if e > deleted => {
+            if let Some(edit) = app.ws.task_edit.as_mut() {
+                edit.0 -= 1;
+            }
+        }
+        _ => {}
+    }
+    if app.ws.task_step > deleted {
+        app.ws.task_step -= 1;
+    }
+    // Deleting the last step leaves the current one on the step before it.
+    let n = app.session.project.tasks.iter().find(|t| t.name == app.ws.task).map_or(0, |t| t.steps.len());
+    app.ws.task_step = app.ws.task_step.min(n.saturating_sub(1));
+}
+
+/// Record Task: the button that starts or stops recording, and how far it has got.
+fn record_row(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    ui.horizontal_wrapped(|ui| match app.ws.recording.as_ref().map(Vec::len) {
+        Some(n) => {
+            ui.label(egui::RichText::new("●").color(t.red));
+            ui.label(crate::i18n::fmt("Recording: {n} steps", &[("n", &n.to_string())]));
+            ui.add(egui::TextEdit::singleline(&mut app.ws.record_name).hint_text(tl!("Task name")).desired_width(150.0));
+            if ui.button(tl!("Stop Recording")).on_hover_text(tl!("Make a task of the steps recorded")).clicked() {
+                let name = app.ws.record_name.clone();
+                run(app, "ui.taskRecord", json!({"name": name}));
+            }
+        }
+        None => {
+            if ui
+                .button(tl!("Record Task"))
+                .on_hover_text(tl!("Do the exercise once: each command that changes the project becomes a step"))
+                .clicked()
+            {
+                run(app, "ui.taskRecord", json!({}));
+            }
+        }
+    });
+}
+
+/// Tasks: pick one, read each step's instructions and run it; record a task, and edit its steps.
+pub fn tasks(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    // Rows wrap at the pane's width rather than widen it: long titles and instructions would
+    // otherwise be cut at its edge.
+    ui.set_max_width(ui.available_width());
     message(app, ui);
+    record_row(app, ui, t);
     let tasks = app.session.project.tasks.clone();
     if tasks.is_empty() {
-        ui.label(egui::RichText::new(tl!("No tasks yet. Data › Task makes one, for example from your geoprocessing history.")).weak());
+        ui.label(
+            egui::RichText::new(tl!("No tasks yet. Record one, or make one from your geoprocessing history with Analyze › Task.")).weak(),
+        );
         return;
     }
     if !tasks.iter().any(|t| t.name == app.ws.task) {
         app.ws.task = tasks.first().map(|t| t.name.clone()).unwrap_or_default();
         app.ws.task_step = 0;
+        app.ws.task_edit = None;
     }
-    egui::ComboBox::from_id_salt("task_pick").selected_text(app.ws.task.as_str()).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-        for t in &tasks {
-            if ui.selectable_label(t.name == app.ws.task, t.name.as_str()).clicked() {
-                app.ws.task = t.name.clone();
-                app.ws.task_step = 0;
-            }
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("task_pick")
+            .selected_text(app.ws.task.as_str())
+            .width((ui.available_width() - 120.0).max(160.0))
+            .show_ui(ui, |ui| {
+                for t in &tasks {
+                    if ui.selectable_label(t.name == app.ws.task, t.name.as_str()).clicked() {
+                        app.ws.task = t.name.clone();
+                        app.ws.task_step = 0;
+                        app.ws.task_edit = None;
+                    }
+                }
+            });
+        // Leaving edit mode drops a step's unsaved edit, which would come back stale.
+        if ui.checkbox(&mut app.ws.task_editing, tl!("Edit Steps")).changed() && !app.ws.task_editing {
+            app.ws.task_edit = None;
         }
     });
     let Some(task) = tasks.iter().find(|t| t.name == app.ws.task) else { return };
     if !task.description.is_empty() {
-        ui.label(egui::RichText::new(&task.description).small());
+        ui.label(egui::RichText::new(&task.description));
     }
+    let name = task.name.clone();
+    let last = task.steps.len().saturating_sub(1);
     for (i, st) in task.steps.iter().enumerate() {
         let current = i == app.ws.task_step;
         egui::Frame::NONE
             .inner_margin(egui::Margin::symmetric(6, 4))
             .fill(if current { ui.visuals().selection.bg_fill.gamma_multiply(0.25) } else { Color32::TRANSPARENT })
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("{}. {}", i + 1, st.title)).font(if current {
-                        semibold(12.0)
+                ui.set_max_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    let title =
+                        egui::RichText::new(format!("{}. {}", i + 1, st.title)).font(if current { semibold(12.5) } else { regular(12.5) });
+                    // Clicking a step's title makes it the current one, to read it.
+                    if ui.add(egui::Label::new(title).sense(Sense::click())).clicked() {
+                        app.ws.task_step = i;
+                    }
+                    if app.ws.task_editing {
+                        // (`RustGisApp::run` keeps the open edit on its step: `follow_move`, `follow_delete`.)
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text(tl!("Move Up")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i - 1}));
+                        }
+                        if ui.add_enabled(i < last, egui::Button::new("▼").small()).on_hover_text(tl!("Move Down")).clicked() {
+                            run(app, "task.moveStep", json!({"task": name, "step": i, "to": i + 1}));
+                        }
+                        if ui.small_button(tl!("Edit")).on_hover_text(tl!("Edit the title and instructions")).clicked() {
+                            app.ws.task_edit = Some((i, st.title.clone(), st.instructions.clone()));
+                            app.ws.task_step = i;
+                        }
+                        if ui.small_button(tl!("Delete")).on_hover_text(tl!("Delete the step")).clicked() {
+                            run(app, "task.removeStep", json!({"task": name, "step": i}));
+                        }
                     } else {
-                        regular(12.0)
-                    }));
-                    if ui.small_button(tl!("Run")).clicked() {
-                        let name = task.name.clone();
-                        if run(app, "task.run", json!({"task": name, "step": i})).is_some() {
+                        // Practice: Show Me says where to do the step; Run does it.
+                        if ui
+                            .small_button(tl!("Show Me"))
+                            .on_hover_text(tl!("Show where this step's command is, to do it yourself"))
+                            .clicked()
+                        {
+                            app.ws.task_step = i;
+                            let said = crate::showme::start(app, st);
+                            app.ws.message = Some((said, false));
+                        }
+                        if ui.small_button(tl!("Run")).on_hover_text(tl!("Do the step for me")).clicked()
+                            && run(app, "task.run", json!({"task": name, "step": i})).is_some()
+                        {
                             app.ws.task_step = i + 1;
                             app.ws.message = Some((crate::i18n::fmt("Step {n} done", &[("n", &(i + 1).to_string())]), false));
                             app.map.invalidate();
                         }
                     }
                 });
-                if !st.instructions.is_empty() && current {
-                    ui.label(egui::RichText::new(&st.instructions).small().weak());
+                let editing = app.ws.task_editing && app.ws.task_edit.as_ref().is_some_and(|e| e.0 == i);
+                if editing {
+                    let mut save = false;
+                    let mut cancel = false;
+                    if let Some((_, title, text)) = app.ws.task_edit.as_mut() {
+                        // As long as task.editStep keeps them, so nothing typed is cut on Save.
+                        ui.add(egui::TextEdit::singleline(title).desired_width(f32::INFINITY).char_limit(200).hint_text(tl!("Title")));
+                        ui.add(
+                            egui::TextEdit::multiline(text)
+                                .char_limit(4000)
+                                .desired_rows(5)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(tl!("What to do, where to find it and why")),
+                        );
+                        ui.horizontal(|ui| {
+                            save = ui.button(tl!("Save")).clicked();
+                            cancel = ui.button(tl!("Cancel")).clicked();
+                        });
+                    }
+                    if save && let Some((step, title, text)) = app.ws.task_edit.clone() {
+                        // Saving what the step already says only closes the editor.
+                        let unchanged = app
+                            .session
+                            .project
+                            .tasks
+                            .iter()
+                            .find(|t| t.name == name)
+                            .and_then(|t| t.steps.get(step))
+                            .is_some_and(|s| s.title == title.trim().chars().take(200).collect::<String>() && s.instructions == text);
+                        if unchanged
+                            || run(app, "task.editStep", json!({"task": name, "step": step, "title": title, "instructions": text}))
+                                .is_some()
+                        {
+                            app.ws.task_edit = None;
+                        }
+                    } else if cancel {
+                        app.ws.task_edit = None;
+                    }
+                } else if !st.instructions.is_empty() && current {
+                    // Read on a lab screen: the normal text size, not dimmed.
+                    ui.label(egui::RichText::new(&st.instructions).font(regular(12.5)));
                 }
             });
     }
-    if app.ws.task_step >= task.steps.len() && !task.steps.is_empty() {
+    if !app.ws.task_editing && app.ws.task_step >= task.steps.len() && !task.steps.is_empty() {
         ui.label(egui::RichText::new(tl!("All steps done.")).small());
         if ui.button(tl!("Start Over")).clicked() {
             app.ws.task_step = 0;
@@ -430,5 +597,71 @@ pub fn catalog_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             app.ui.tab = "Publish".into();
         }
         app.map.invalidate();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_step_being_edited_follows_a_move() {
+        let mut app = RustGisApp::with_sample();
+        app.ws.task_edit = Some((2, "Title".into(), "Text".into()));
+        app.ws.task_step = 2;
+        // Step 2 moves up: the text typed for it stays with it, now at 1.
+        follow_move(&mut app, 2, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(1));
+        assert_eq!(app.ws.task_step, 1);
+        // The step above moves down into its place: it moves up, out of the way, to 0.
+        follow_move(&mut app, 0, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        // Steps elsewhere don't touch it.
+        follow_move(&mut app, 4, 5);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(0));
+        // A move past it, several places at once, shifts it by one: step 0 to 3 moves it to 0's
+        // old place's neighbour, and back.
+        app.ws.task_edit = Some((2, "Title".into(), "Text".into()));
+        follow_move(&mut app, 0, 3);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(1));
+        follow_move(&mut app, 3, 0);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(2));
+        // The edited step itself moving far goes where it went.
+        follow_move(&mut app, 2, 5);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(5));
+    }
+
+    #[test]
+    fn deleting_a_step_keeps_an_edit_on_another() {
+        let mut app = RustGisApp::with_sample();
+        // The task as follow_delete sees it, after each deletion (it only reads the count).
+        let task = |app: &mut RustGisApp, n: usize| {
+            let steps: Vec<_> = (0..n).map(|i| json!({"title": format!("Step {i}"), "command": "map.zoomFull", "params": {}})).collect();
+            let _ = app.session.run("task.remove", &json!({"task": "Lesson"}));
+            app.session.run("task.new", &json!({"name": "Lesson", "steps": steps})).unwrap();
+            app.ws.task = "Lesson".into();
+        };
+        task(&mut app, 5);
+        app.ws.task_edit = Some((3, "Title".into(), "Typed".into()));
+        app.ws.task_step = 3;
+        // An earlier step goes: the edit stays, one place up.
+        task(&mut app, 4);
+        follow_delete(&mut app, 1);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| (e.0, e.2.as_str())), Some((2, "Typed")));
+        assert_eq!(app.ws.task_step, 2);
+        // A later step goes: nothing moves.
+        task(&mut app, 3);
+        follow_delete(&mut app, 3);
+        assert_eq!(app.ws.task_edit.as_ref().map(|e| e.0), Some(2));
+        // The step being edited goes: its edit closes.
+        task(&mut app, 2);
+        follow_delete(&mut app, 2);
+        assert!(app.ws.task_edit.is_none());
+        // The last step going leaves the current one on the step before it.
+        app.ws.task_step = 1;
+        task(&mut app, 1);
+        follow_delete(&mut app, 1);
+        assert_eq!(app.ws.task_step, 0);
     }
 }

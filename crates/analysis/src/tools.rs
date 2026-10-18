@@ -273,6 +273,11 @@ fn rows(inp: &dyn Inputs, p: &Json, k: &str, ds: &Dataset) -> Vec<usize> {
     if sel.is_empty() { (0..ds.features.len()).collect() } else { sel.iter().copied().filter(|r| *r < ds.features.len()).collect() }
 }
 
+/// The name of a tool's new layer, from its `output` parameter. Every built-in tool names its
+/// output layer through here, and an `output` is only ever a layer name in the session, never a
+/// file: `touches_files` in rustgis-engine relies on this to let tasks, models and notebooks from
+/// files name their outputs. A built-in tool that writes a file must take its path under another
+/// parameter (`path`), which stays refused.
 fn out_name(p: &Json, default: String) -> String {
     let n = s(p, "output").trim();
     if n.is_empty() { default } else { n.to_string() }
@@ -990,6 +995,109 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `touches_files` in rustgis-engine lets tasks, models and notebooks from files set a built-in
+    /// tool's `output`, because it only names the new layer (`out_name`). Hold every built-in tool
+    /// to that: an `output` parameter is plain text, a run names its layer after it, and no tool
+    /// here writes a file at all (it hands back layers; the engine adds them), so `output` can't
+    /// be made a place by a tool's body either.
+    #[test]
+    fn a_built_in_tools_output_only_names_its_layer() {
+        for spec in TOOLS {
+            for p in spec.params.iter().filter(|p| p.name.eq_ignore_ascii_case("output")) {
+                assert!(matches!(p.kind, K::Text), "{}: output must be a layer name (Text), not {:?}", spec.id, p.kind);
+            }
+        }
+        let m = inputs();
+        let r = crate::run("buffer", &m, &serde_json::json!({"input": "pts", "distance": 1, "output": "Named"})).unwrap();
+        assert_eq!(layer(r).name, "Named");
+        // A best-effort tripwire, not a proof: the crate's code (every file under src/, up to its
+        // test module) names nothing that reaches the file system, a path type included (a tool
+        // here takes layers, not paths). It can't see a write through another crate's helper;
+        // `no_built_in_tool_writes_its_output_as_a_file` runs the tools for that, and review
+        // still has to keep tools to it.
+        // (Read where the sources are: not in a wasm test runner.)
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut scanned = 0;
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+                    // The tests (this one reads files) are the `mod tests` closing each file: the
+                    // first `#[cfg(test)]` must open it, so no test-only item hides the code after
+                    // it. (Code after the test module would go unseen; the crate keeps none, and
+                    // the runtime test below runs the tools whatever their source.)
+                    let code = match text.find("#[cfg(test)]") {
+                        None => text.as_str(),
+                        Some(at) => {
+                            let (code, tests) = text.split_at(at);
+                            assert!(
+                                tests.starts_with("#[cfg(test)]\nmod tests {"),
+                                "{}: a `#[cfg(test)]` before its `mod tests`",
+                                path.display()
+                            );
+                            code
+                        }
+                    };
+                    // The standard library's files and paths, and rustgis-data's writers that take a path
+                    // (its byte writers, such as GeoTIFF's, return bytes and are fine).
+                    let reaches =
+                        ["fs::", "std::fs", "File::", "io::Write", "OpenOptions", "std::path", "write_path", "write_atomic", "gpkg::write"];
+                    for reach in reaches {
+                        assert!(!code.contains(reach), "{}: names {reach}, so a tool's output could become a place", path.display());
+                    }
+                    scanned += 1;
+                }
+            }
+        }
+        assert!(cfg!(target_arch = "wasm32") || scanned > 5, "the sources were read");
+    }
+
+    /// The runtime side of the guard above: every built-in tool, run with `output` set to a path
+    /// in an empty folder (other parameters from their defaults, layers from `inputs`), leaves
+    /// that folder empty. A tool that can't run on these inputs fails before writing anything,
+    /// so this catches a tool that writes its output wherever it runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn no_built_in_tool_writes_its_output_as_a_file() {
+        let dir = std::env::temp_dir().join(format!("rustgis-tool-output-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = inputs();
+        let mut ran = 0;
+        for spec in TOOLS {
+            let mut p = serde_json::Map::new();
+            for param in spec.params {
+                let value = match serde_json::from_str::<serde_json::Value>(param.default) {
+                    Ok(v) => v,
+                    Err(_) => match param.kind {
+                        K::Number => serde_json::json!(1),
+                        K::Bool => serde_json::json!(false),
+                        K::Text => serde_json::json!("a"),
+                        K::Choice(c) => serde_json::json!(c.first().copied().unwrap_or_default()),
+                        K::Field | K::NumericField | K::CoordinateField => serde_json::json!("v"),
+                        K::PolygonLayer => serde_json::json!("polys"),
+                        K::Path => continue,
+                        _ => serde_json::json!("pts"),
+                    },
+                };
+                p.insert(param.name.into(), value);
+            }
+            let out = dir.join(format!("{}.geojson", spec.id));
+            p.insert("output".into(), serde_json::json!(out.display().to_string()));
+            ran += usize::from(crate::run(spec.id, &m, &serde_json::Value::Object(p)).is_ok());
+            let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+            if !left.is_empty() {
+                // (The folder goes before the test fails, not left behind.)
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("{} wrote {left:?} where its output was named", spec.id);
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
+        assert!(ran * 2 >= TOOLS.len(), "only {ran} of {} tools ran on these inputs", TOOLS.len());
     }
 
     #[test]
