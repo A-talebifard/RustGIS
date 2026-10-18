@@ -7,7 +7,7 @@ use rustgis_geom::{Coord, lonlat_to_merc, merc_to_lonlat};
 use rustgis_map::{Rgba, graphics};
 use serde_json::{Value, json};
 
-use super::{b, f, ps};
+use super::{b, f, ps, uint};
 use crate::{CmdResult, CommandSpec as C, Session};
 
 /// Largest picture accepted (16 MiB).
@@ -29,6 +29,9 @@ pub fn commands() -> Vec<C> {
         C::new("graphics.style", "Graphic Style", "Edit › Graphics", style)
             .when(super::need_selection)
             .params(r##"{"fill"?: "#RRGGBBAA", "outline"?: "#RRGGBBAA", "width"?: number, "size"?: number, "fontSize"?: number, "text"?: string}"##),
+        C::new("graphics.edit", "Edit Graphic", "Edit › Graphics", edit).params(
+            r##"{"layer": graphics layer, "row": number, "text"?: string, "fontSize"?: number, "fill"?: "#RRGGBBAA", "outline"?: "#RRGGBBAA", "width"?: number, "size"?: number}"##,
+        ),
         C::new("graphics.keepTool", "Keep the last tool active", "Edit › Graphics", |s, p| {
             s.keep_tool = b(p, "on").unwrap_or(!s.keep_tool);
             Ok(json!({"keepTool": s.keep_tool}))
@@ -244,16 +247,16 @@ fn add(s: &mut Session, p: &Value) -> CmdResult {
     let (fill, outline) = (color(p, "fill")?, color(p, "outline")?);
     let id = target(s, p)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
-    let num = |k: &str, max: f64| f(p, k).map(|v| Attr::Float(v.clamp(0.0, max))).unwrap_or(Attr::Null);
+    let num = |k: &str, min: f64, max: f64| f(p, k).map(|v| Attr::Float(v.clamp(min, max))).unwrap_or(Attr::Null);
     let opt = |v: Option<String>| v.map(Attr::Text).unwrap_or(Attr::Null);
     let attrs = vec![
         Attr::Text(shape.clone()),
         opt(text),
         opt(fill),
         opt(outline),
-        num("width", 50.0),
-        num("size", 200.0),
-        num("fontSize", 200.0),
+        num("width", 0.0, 50.0),
+        num("size", 0.0, 200.0),
+        num("fontSize", 4.0, 200.0),
         opt(image),
     ];
     l.dataset.push(Some(g), attrs);
@@ -263,14 +266,42 @@ fn add(s: &mut Session, p: &Value) -> CmdResult {
 }
 
 fn style(s: &mut Session, p: &Value) -> CmdResult {
+    restyle(s, p, None)
+}
+
+/// Changes one graphic, named by layer and row, as `graphics.style` changes the selected ones.
+fn edit(s: &mut Session, p: &Value) -> CmdResult {
+    // Never the active layer: a row means nothing without the layer it was read from.
+    if !p.get("layer").is_some_and(|v| v.is_number() || v.is_string()) {
+        return Err("layer is required".into());
+    }
+    let id = s.layer_id(p)?;
+    let l = s.map().layer(id).filter(|l| l.graphics).ok_or("that isn't a graphics layer")?;
+    let row =
+        uint(p, "row").and_then(|r| usize::try_from(r).ok()).filter(|r| *r < l.dataset.features.len()).ok_or("no graphic at that row")?;
+    if let Some(t) = ps(p, "text") {
+        if graphics::kind(&l.dataset, row) != "text" {
+            return Err("only a text graphic has text".into());
+        }
+        if t.chars().take(2000).all(char::is_whitespace) {
+            return Err("text is required".into());
+        }
+    }
+    restyle(s, p, Some((id, row)))
+}
+
+/// Sets the style (and a text graphic's text) of one graphic, or else of the selected ones.
+fn restyle(s: &mut Session, p: &Value, one: Option<(u32, usize)>) -> CmdResult {
     let (fill, outline) = (color(p, "fill")?, color(p, "outline")?);
     let text = ps(p, "text").map(|t| t.chars().take(2000).collect::<String>());
-    let nums = [("width", "width", 50.0), ("size", "size", 200.0), ("font_size", "fontSize", 200.0)];
-    if fill.is_none() && outline.is_none() && text.is_none() && nums.iter().all(|(_, k, _)| f(p, k).is_none()) {
+    // Font sizes are kept within the range they are drawn at (graphics::font_size).
+    let nums = [("width", "width", 0.0, 50.0), ("size", "size", 0.0, 200.0), ("font_size", "fontSize", 4.0, 200.0)];
+    if fill.is_none() && outline.is_none() && text.is_none() && nums.iter().all(|(_, k, _, _)| f(p, k).is_none()) {
         return Err("give a fill, outline, width, size, fontSize or text".into());
     }
     let mut n = 0;
-    for l in s.map_mut().layers.iter_mut().filter(|l| l.graphics && !l.selection.is_empty()) {
+    let targeted = |l: &rustgis_map::Layer| one.map_or(!l.selection.is_empty(), |(id, _)| l.id == id);
+    for l in s.map_mut().layers.iter_mut().filter(|l| l.graphics && targeted(l)) {
         let mut sets: Vec<(&str, Attr)> = Vec::new();
         if let Some(c) = &fill {
             sets.push(("fill", Attr::Text(c.clone())));
@@ -278,14 +309,15 @@ fn style(s: &mut Session, p: &Value) -> CmdResult {
         if let Some(c) = &outline {
             sets.push(("outline", Attr::Text(c.clone())));
         }
-        for (field, k, max) in nums {
+        for (field, k, min, max) in nums {
             if let Some(v) = f(p, k) {
-                sets.push((field, Attr::Float(v.clamp(0.0, max))));
+                sets.push((field, Attr::Float(v.clamp(min, max))));
             }
         }
         let sets: Vec<(Option<usize>, Attr)> = sets.into_iter().map(|(k, v)| (l.dataset.field_index(k), v)).collect();
         let text_field = l.dataset.field_index("text");
-        for r in l.selection.clone() {
+        let rows = one.map_or_else(|| l.selection.clone(), |(_, row)| vec![row]);
+        for r in rows {
             let is_text = graphics::kind(&l.dataset, r) == "text";
             let Some(ft) = l.dataset.features.get_mut(r) else { continue };
             for (fi, v) in &sets {

@@ -112,6 +112,8 @@ pub struct MapView {
     pub pointer_lonlat: Option<Coord>,
     /// Where the map's context menu was opened: the pointer leaves the map for the menu.
     pub menu_lonlat: Option<Coord>,
+    /// The text graphic the context menu was opened on (layer id, row), for Edit Text.
+    pub menu_text: Option<(u32, usize)>,
     pub dms: bool,
     pub render_ms: u64,
     pub notices_seen: usize,
@@ -185,6 +187,7 @@ impl Default for MapView {
             deleting: None,
             pointer_lonlat: None,
             menu_lonlat: None,
+            menu_text: None,
             dms: false,
             render_ms: 0,
             notices_seen: 0,
@@ -885,6 +888,35 @@ pub(crate) fn lonlat_to_screen(app: &RustGisApp, rect: Rect, c: Coord) -> Option
     Some(pos2(rect.min.x + x as f32, rect.min.y + y as f32))
 }
 
+/// The text graphic drawn on top under the screen point `p`, as (layer id, row): one whose text,
+/// with its dynamic values filled in as drawn, covers the point.
+pub(crate) fn text_graphic_at(app: &RustGisApp, ctx: &egui::Context, rect: Rect, p: Pos2) -> Option<(u32, usize)> {
+    use rustgis_engine::map::graphics;
+    let (map, scale) = (app.session.map(), app.session.scale());
+    let tokens = graphics::TokenValues::of(map, scale);
+    // Only what is drawn, as render_frame draws it: the first layer on top, and in a layer the
+    // last row. Fully transparent layers and rows beyond the view clipping distance are not drawn.
+    let clip = map.view.clip_distance.map(|d| (map.camera.center_lonlat(), d));
+    map.layers.iter().filter(|l| l.graphics && map.draws_at(l, scale) && map.layer_opacity(l) > 0.0).find_map(|l| {
+        let drawn = l.drawn_rows(scale);
+        (0..l.dataset.features.len()).rev().filter(|r| drawn.get(*r) == Some(&true)).find_map(|row| {
+            let g = l.dataset.features.get(row)?.geometry.as_ref()?;
+            if let Some((centre, d)) = clip {
+                let e = g.extent();
+                let near = Coord::new(centre.x.clamp(e.min_x, e.max_x), centre.y.clamp(e.min_y, e.max_y));
+                if e.is_empty() || rustgis_engine::geom::haversine_m(centre, near) > d {
+                    return None;
+                }
+            }
+            let text = graphics::expand(graphics::label(&l.dataset, row)?, &tokens);
+            let at = lonlat_to_screen(app, rect, g.label_point()?)?;
+            let font = regular(graphics::font_size(&l.dataset, row) * 1.33);
+            let size = ctx.fonts_mut(|f| f.layout_no_wrap(text, font, Color32::WHITE).size());
+            Rect::from_center_size(at, size).expand(3.0).contains(p).then_some((l.id, row))
+        })
+    })
+}
+
 /// Centres the map on a place as it moves along (a simulated drive), keeping the zoom; the map
 /// treats it like a pan, shifting its last frame between redraws.
 pub(crate) fn follow(app: &mut RustGisApp, c: Coord, time: f64) {
@@ -1211,6 +1243,14 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
         } else if tool == Tool::EditVertices {
             // Its two clicks chose a vertex or a feature; zooming would lose the place.
         } else if let Some(p) = resp.interact_pointer_pos() {
+            // A double-click on a text graphic edits it; elsewhere it zooms in.
+            if matches!(tool, Tool::Explore | Tool::Select)
+                && let Some((layer, row)) = text_graphic_at(app, ui.ctx(), rect, p)
+            {
+                app.map.popup = None;
+                let _ = app.run("ui.dialog", json!({"name": "graphicText", "layer": layer, "row": row}));
+                return;
+            }
             zoom(app, 2.0, (p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64, w, h);
             app.map.last_interaction = time;
             app.map.camera_moved = true;
@@ -1318,6 +1358,7 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
     }
     if resp.secondary_clicked() {
         app.map.menu_lonlat = app.map.pointer_lonlat;
+        app.map.menu_text = resp.interact_pointer_pos().and_then(|p| text_graphic_at(app, ui.ctx(), rect, p));
     }
     // No menu off the Earth (a globe's corners): there is no place for it to act on.
     if let Some(c) = app.map.menu_lonlat {
@@ -2332,5 +2373,61 @@ mod tests {
         }
         assert_eq!(mv.fps(1.7), Some(10), "only the new burst counts");
         assert_eq!(mv.fps(2.3), None, "idle (no frame in 500 ms)");
+    }
+
+    /// A text graphic is found anywhere on its text, not only at its anchor (#420).
+    #[test]
+    fn text_graphics_are_hit_on_their_text() {
+        let mut app = RustGisApp::with_sample();
+        let c = app.session.map().center_lonlat();
+        let r = app
+            .run("graphics.add", json!({"shape": "text", "points": [[c.x, c.y]], "text": "A long piece of text", "fontSize": 20}))
+            .unwrap();
+        let hit = r["layer"].as_u64().zip(r["row"].as_u64()).map(|(l, r)| (l as u32, r as usize));
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        let mut out = egui::Context::default().run_ui(Default::default(), |ui| {
+            let at = lonlat_to_screen(&app, rect, c).unwrap();
+            assert_eq!(text_graphic_at(&app, ui.ctx(), rect, at), hit);
+            assert_eq!(text_graphic_at(&app, ui.ctx(), rect, at + vec2(60.0, 0.0)), hit, "on the text, off its anchor");
+            assert_eq!(text_graphic_at(&app, ui.ctx(), rect, at + vec2(0.0, 40.0)), None);
+        });
+        out.textures_delta.clear();
+        // Dynamic text is measured as drawn ("1:20,000,000"), wider than its token ("{scale}").
+        let r =
+            app.run("graphics.add", json!({"shape": "text", "points": [[c.x, c.y - 30.0]], "text": "{scale}", "fontSize": 20})).unwrap();
+        let hit = r["layer"].as_u64().zip(r["row"].as_u64()).map(|(l, r)| (l as u32, r as usize));
+        let mut out = egui::Context::default().run_ui(Default::default(), |ui| {
+            let at = lonlat_to_screen(&app, rect, Coord::new(c.x, c.y - 30.0)).unwrap();
+            assert_eq!(text_graphic_at(&app, ui.ctx(), rect, at + vec2(50.0, 0.0)), hit, "on the scale it shows");
+        });
+        out.textures_delta.clear();
+        // Text that isn't drawn (its layer's group is hidden) can't be hit.
+        let layer = r["layer"].clone();
+        app.run("group.add", json!({"name": "Notes", "layers": [layer]})).unwrap();
+        app.run("group.set", json!({"group": "Notes", "visible": false})).unwrap();
+        let mut out = egui::Context::default().run_ui(Default::default(), |ui| {
+            let at = lonlat_to_screen(&app, rect, Coord::new(c.x, c.y - 30.0)).unwrap();
+            assert_eq!(text_graphic_at(&app, ui.ctx(), rect, at), None);
+        });
+        out.textures_delta.clear();
+        // Nor text clipped away by the view's clipping distance (it sits ~3,300 km from the
+        // centre), or on a fully transparent layer.
+        app.run("group.set", json!({"group": "Notes", "visible": true})).unwrap();
+        let probe = |app: &RustGisApp| {
+            let mut found = None;
+            let mut out = egui::Context::default().run_ui(Default::default(), |ui| {
+                let at = lonlat_to_screen(app, rect, Coord::new(c.x, c.y - 30.0)).unwrap();
+                found = text_graphic_at(app, ui.ctx(), rect, at + vec2(50.0, 0.0));
+            });
+            out.textures_delta.clear();
+            found
+        };
+        assert_eq!(probe(&app), hit);
+        app.run("map.clipping", json!({"distance": 1_000_000.0})).unwrap();
+        assert_eq!(probe(&app), None, "beyond the clipping distance");
+        app.run("map.clipping", json!({"mode": "none"})).unwrap();
+        assert_eq!(probe(&app), hit);
+        app.run("group.set", json!({"group": "Notes", "transparency": 100})).unwrap();
+        assert_eq!(probe(&app), None, "on a fully transparent layer");
     }
 }
