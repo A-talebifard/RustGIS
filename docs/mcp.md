@@ -119,6 +119,30 @@ An agent the app starts itself gets a run-scoped token instead of the relay's ow
 permission, and the app revokes it when it's done with the agent; that closes its connections and
 removes its file.
 
+### The file bridge
+
+For an agent that can't use MCP, or when the relay's port is taken, the app also runs scripts
+written to a file. It's on while **Let your Agents Control RustGIS** is ticked, even if the relay
+couldn't start: agents then stay on, and the status bar says only the file bridge is running.
+
+1. Write a script to `bridge-command.txt` in the relay's private folder
+   (`$XDG_RUNTIME_DIR/rustgis` on Linux, a `rustgis-mcp-<user>` folder in the temporary folder
+   elsewhere). The settings section shows the full path. The script is in the `script.run` format:
+   one `command-id {json}` per line, `#` for comments.
+2. Once the file has stopped changing for half a second, RustGIS runs it on the open project. (To be
+   sure a half-written script never runs, write it to another file in the folder and rename it to
+   `bridge-command.txt`.) It runs as one undo step, with
+   the same rules as the `run` tool: a refused or failing line stops it, and nothing it did to the
+   project is kept.
+3. The outcome is written to `bridge-result.json` in the same folder: `{success, result, lines,
+   layersAdded, notices, error, duration_s, timestamp}`. The status bar says whether it worked.
+
+Only one RustGIS at a time runs the bridge: a second copy's is refused while the first's runs
+(it holds `bridge.lock`). The bridge runs a script each time the file changes. Whatever the file held when the bridge started
+isn't run. While the bridge is on, `bridge-ready.json` there holds its `pid`, the two files' paths,
+`started_at`, the app `version` and a `schema` number. The folder is readable by this user only,
+like the relay's token.
+
 ### Relay requirements
 
 - **Off until asked.** Only `ui.mcpRelay` starts a listener: run directly, or by ticking **Let your
