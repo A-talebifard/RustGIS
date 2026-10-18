@@ -226,8 +226,9 @@ fn authority_code(a: &Node) -> Option<u32> {
     }
 }
 
-/// Longitude/latitude in degrees: WGS 84 itself for WGS 84, NAD 83 and ETRS 89 (which differ by
-/// a metre or so) from Greenwich, otherwise on the file's own datum and prime meridian.
+/// Longitude/latitude in degrees: WGS 84 itself for WGS 84, NAD 83, ETRS 89 and SIRGAS 2000
+/// (which differ by a metre or so) from Greenwich, otherwise on the file's own datum and prime
+/// meridian.
 fn geographic(g: &Node) -> Result<Crs, String> {
     if let Some(f) = g.child("UNIT").and_then(|u| u.num(0))
         && (f - 1f64.to_radians()).abs() > 1e-9
@@ -236,7 +237,7 @@ fn geographic(g: &Node) -> Result<Crs, String> {
     }
     let datum = g.child("DATUM");
     let greenwich = g.child("PRIMEM").and_then(|m| m.num(0)).is_none_or(|pm| pm == 0.0);
-    if greenwich && (datum.is_none() || wgs84_like(datum).is_some()) {
+    if greenwich && (datum.is_none() || (wgs84_like(datum).is_some() && !shifted(datum))) {
         return Ok(Crs::LonLat);
     }
     let label = match g.title().trim() {
@@ -263,14 +264,18 @@ fn projected(p: &Node) -> Result<Crs, String> {
     {
         return Ok(Crs::WebMercator);
     }
-    if let Some(crs) = utm(&name).and_then(Crs::from_epsg) {
+    // (By its EPSG code only when the file adds no shift of its own to the datum.)
+    if !shifted(p.child("GEOGCS").and_then(|g| g.child("DATUM")))
+        && let Some(crs) = utm(&name).and_then(Crs::from_epsg)
+    {
         return Ok(crs);
     }
     custom(p, &method)
 }
 
-/// The EPSG code of a UTM zone on WGS 84, NAD 83 or ETRS 89 from its name
-/// (`WGS_1984_UTM_Zone_31N`, `WGS 84 / UTM zone 31N`, `NAD83 / UTM zone 17N`).
+/// The EPSG code of a UTM zone on WGS 84, NAD 83, ETRS 89 or SIRGAS 2000 from its name
+/// (`WGS_1984_UTM_Zone_31N`, `WGS 84 / UTM zone 31N`, `NAD83 / UTM zone 17N`,
+/// `SIRGAS_2000_UTM_Zone_24S`).
 fn utm(name: &str) -> Option<u32> {
     let (datum, zone) = name.split_once("_UTM_ZONE_")?;
     let digits: String = zone.chars().take_while(char::is_ascii_digit).collect();
@@ -284,6 +289,14 @@ fn utm(name: &str) -> Option<u32> {
         "WGS_1984" | "WGS_84" => Some(if north { 32600 } else { 32700 } + z),
         "NAD_1983" | "NAD83" if north => Some(26900 + z),
         "ETRS_1989" | "ETRS89" if north => Some(25800 + z),
+        "SIRGAS_2000" | "SIRGAS2000" => match (north, z) {
+            (true, 11..=22) => Some(31954 + z),
+            (true, 23) => Some(6210),
+            (true, 24) => Some(6211),
+            (false, 17..=25) => Some(31960 + z),
+            (false, 26) => Some(5396),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -377,9 +390,20 @@ fn wgs84_like(datum: Option<&Node>) -> Option<&'static str> {
         | "ETRS89"
         | "EUROPEAN_TERRESTRIAL_REFERENCE_SYSTEM_1989"
         | "GDA_1994"
-        | "GDA94" => Some("+ellps=GRS80 +towgs84=0,0,0"),
+        | "GDA94"
+        // SIRGAS 2000, the datum of Brazil and most of Latin America (EPSG:4674): its
+        // transformation to WGS 84 is null, like the others here.
+        | "SIRGAS_2000"
+        | "SIRGAS2000"
+        | "SISTEMA_DE_REFERENCIA_GEOCENTRICO_PARA_LAS_AMERICAS_2000" => Some("+ellps=GRS80 +towgs84=0,0,0"),
         _ => None,
     }
+}
+
+/// Whether the file gives the datum a `TOWGS84` shift other than none, which then wins over the
+/// null shift a WGS 84-like datum would get by its name: the file says what it was made with.
+fn shifted(datum: Option<&Node>) -> bool {
+    towgs84(datum).is_some_and(|t| t.iter().any(|v| *v != 0.0))
 }
 
 /// The datum's `TOWGS84` shift, when it gives a usable one.
@@ -403,7 +427,7 @@ fn datum_note(geog: Option<&Node>) -> Option<String> {
 /// prime meridian.
 fn earth(geog: Option<&Node>) -> String {
     let datum = geog.and_then(|g| g.child("DATUM"));
-    let mut out = match wgs84_like(datum) {
+    let mut out = match wgs84_like(datum).filter(|_| !shifted(datum)) {
         Some(d) => d.to_string(),
         None => {
             let sph = datum.and_then(|d| d.child("SPHEROID").or_else(|| d.child("ELLIPSOID")));
@@ -490,6 +514,57 @@ mod tests {
         // Esri names for WGS 84 systems need no note.
         assert_eq!(read_wkt(GEOG_4326), Ok((Crs::LonLat, None)));
         assert_eq!(read_wkt(ESRI_32631), Ok((Crs::Epsg(32631), None)));
+    }
+
+    #[test]
+    fn sirgas_2000_reads_as_wgs_84_without_a_note() {
+        // As FBDS ships its hydrography of Brazil (Esri names), projected and geographic.
+        let utm_24s = r#"PROJCS["SIRGAS_2000_UTM_Zone_24S",GEOGCS["GCS_SIRGAS_2000",DATUM["D_SIRGAS_2000",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],PARAMETER["False_Northing",10000000.0],PARAMETER["Central_Meridian",-39.0],PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]"#;
+        assert_eq!(read_wkt(utm_24s), Ok((Crs::Epsg(31984), None)));
+        let geographic = r#"GEOGCS["GCS_SIRGAS_2000",DATUM["D_SIRGAS_2000",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert_eq!(read_wkt(geographic), Ok((Crs::LonLat, None)));
+        // The EPSG datum name, as OGC WKT writes it.
+        let ogc = geographic.replace("D_SIRGAS_2000", "Sistema_de_Referencia_Geocentrico_para_las_AmericaS_2000");
+        assert_eq!(read_wkt(&ogc), Ok((Crs::LonLat, None)));
+        // Every SIRGAS 2000 UTM zone with an EPSG code, by its name.
+        assert_eq!(utm(&norm("SIRGAS 2000 / UTM zone 11N")), Some(31965));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_22N"), Some(31976));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_23N"), Some(6210));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_24N"), Some(6211));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_17S"), Some(31977));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_23S"), Some(31983));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_25S"), Some(31985));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_26S"), Some(5396));
+        assert_eq!(utm("SIRGAS_2000_UTM_ZONE_10S"), None);
+        for code in [31965, 31976, 6210, 6211, 31977, 31985, 5396] {
+            assert!(Crs::from_epsg(code).is_some(), "EPSG:{code}");
+        }
+        // A zone without an EPSG code is still read, by its parameters, and without a note.
+        let zone_10s = utm_24s.replace("Zone_24S", "Zone_10S").replace("-39.0", "-123.0");
+        let (crs, note) = read_wkt(&zone_10s).unwrap();
+        assert!(matches!(crs, Crs::Custom(_)) && note.is_none());
+        // A shift the file gives the datum wins over the null one its name would get, for every
+        // WGS 84-like datum, geographic or projected; a zero shift changes nothing.
+        let shift = r#"TOWGS84[-67.35,3.88,-38.22,0,0,0,0]"#;
+        let with = |wkt: &str, datum: &str| wkt.replace(&format!(r#"DATUM["{datum}","#), &format!(r#"DATUM["{datum}",{shift},"#));
+        for (wkt, datum) in [(geographic, "D_SIRGAS_2000"), (utm_24s, "D_SIRGAS_2000"), (GEOG_4326, "D_WGS_1984")] {
+            let (crs, note) = read_wkt(&with(wkt, datum)).unwrap();
+            let def = crs.custom_def().unwrap_or_else(|| panic!("{datum}: {crs:?}"));
+            assert!(def.proj4.contains("+towgs84=-67.35,3.88,-38.22"), "{}", def.proj4);
+            assert!(note.is_none());
+        }
+        let nad83 = r#"GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",TOWGS84[1,2,3],SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#;
+        assert!(read_wkt(nad83).unwrap().0.custom_def().is_some_and(|d| d.proj4.contains("+towgs84=1,2,3")));
+        let zero = utm_24s.replace(r#"DATUM["D_SIRGAS_2000","#, r#"DATUM["D_SIRGAS_2000",TOWGS84[0,0,0,0,0,0,0],"#);
+        assert_eq!(read_wkt(&zero), Ok((Crs::Epsg(31984), None)));
+        // Brazil's older datums keep the note: without TOWGS84 they're tens of metres off.
+        for (datum, spheroid) in [
+            ("D_South_American_1969", r#"SPHEROID["GRS_1967_Truncated",6378160.0,298.25]"#),
+            ("D_Corrego_Alegre", r#"SPHEROID["International_1924",6378388.0,297.0]"#),
+        ] {
+            let old = format!(r#"GEOGCS["GCS_old",DATUM["{datum}",{spheroid}],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]"#);
+            assert!(read_wkt(&old).unwrap().1.is_some_and(|n| n.contains(datum)), "{datum}");
+        }
     }
 
     #[test]
