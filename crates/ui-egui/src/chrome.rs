@@ -229,29 +229,50 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
             ui.painter().line_segment([pos2(r.min.x - 10.0, r.min.y), pos2(r.max.x + 10.0, r.min.y)], Stroke::new(1.0, t.border));
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
-                // Scale.
+                // Scale: typed (1:12,345, 12345, 25k, …) and set with Enter, or picked from the
+                // list. Esc, or clicking away, leaves the map's scale as it was.
                 let scale = app.session.scale();
-                egui::ComboBox::from_id_salt("status_scale")
-                    .selected_text(format!("1:{}", crate::ribbon::fmt_thousands(scale.round())))
-                    .width(130.0)
-                    .show_ui(ui, |ui| {
-                        for s in [
-                            5_000.0,
-                            25_000.0,
-                            100_000.0,
-                            500_000.0,
-                            1_000_000.0,
-                            5_000_000.0,
-                            10_000_000.0,
-                            25_000_000.0,
-                            50_000_000.0,
-                            100_000_000.0,
-                        ] {
-                            if ui.selectable_label(false, format!("1:{}", crate::ribbon::fmt_thousands(s))).clicked() {
-                                let _ = app.run("map.setScale", json!({"scale": s}));
-                            }
+                let shown = format!("1:{}", crate::ribbon::fmt_thousands(scale.round()));
+                let mut text = app.ui.scale_text.take().unwrap_or_else(|| shown.clone());
+                let mut edit = egui::TextEdit::singleline(&mut text).id_salt("status_scale").desired_width(96.0).show(ui);
+                // Clicking in selects the scale, so typing replaces it.
+                if edit.response.gained_focus() {
+                    let end = edit.galley.text().chars().count();
+                    edit.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(end))));
+                    edit.state.store(ui.ctx(), edit.response.id);
+                }
+                let r = edit.response.response.on_hover_text(tl!("Type a scale, such as 1:12,345, 12345 or 25k, and press Enter"));
+                // The box's own focus, not the window's: switching windows keeps a half-typed scale.
+                if ui.ctx().memory(|m| m.has_focus(r.id)) {
+                    app.ui.scale_text = Some(text);
+                } else if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && text != shown {
+                    match parse_scale(&text) {
+                        Some(s) => {
+                            let _ = app.run("map.setScale", json!({"scale": s}));
                         }
-                    });
+                        None => app.session.notify(crate::i18n::fmt("'{text}' isn't a scale: type one such as 1:12,345", &[("text", &text)]), true),
+                    }
+                }
+                let presets = ui.add(egui::Button::new("▾").small().frame(false)).on_hover_text(tl!("Common scales"));
+                egui::Popup::menu(&presets).show(|ui| {
+                    for s in [
+                        5_000.0,
+                        25_000.0,
+                        100_000.0,
+                        500_000.0,
+                        1_000_000.0,
+                        5_000_000.0,
+                        10_000_000.0,
+                        25_000_000.0,
+                        50_000_000.0,
+                        100_000_000.0,
+                    ] {
+                        if ui.selectable_label(false, format!("1:{}", crate::ribbon::fmt_thousands(s))).clicked() {
+                            let _ = app.run("map.setScale", json!({"scale": s}));
+                            ui.close();
+                        }
+                    }
+                });
                 // The flat map's bearing and pitch (the globe has neither); clicking them on a
                 // turned or tilted map faces north and looks straight down again.
                 if !app.session.map().projection.is_globe() {
@@ -370,6 +391,42 @@ pub fn status_bar(app: &mut RustGisApp, ui: &mut Ui) {
 fn sep(ui: &mut Ui, t: &Tokens) {
     let (r, _) = ui.allocate_exact_size(vec2(1.0, 14.0), Sense::hover());
     ui.painter().rect_filled(r, 0.0, t.border_strong);
+}
+
+/// A map scale typed into the status bar, as its denominator: `1:12,345`, `1/12345`, `12345`,
+/// `12 345`, `12'345`, `12.345` (dots grouping thousands, as many languages write it), `25k` or
+/// `2.5m`. None unless it's a plain number of at least 1: no exponents, and commas or
+/// apostrophes only between groups of three digits (`1:2,5m` is a typo, not 25 million).
+fn parse_scale(text: &str) -> Option<f64> {
+    let t: String = text.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let chars: Vec<char> = t.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if matches!(c, ',' | '\'' | '’') {
+            let before = i.checked_sub(1).and_then(|j| chars.get(j)).is_some_and(|c| c.is_ascii_digit());
+            let group = chars.get(i + 1..i + 4).is_some_and(|g| g.iter().all(|c| c.is_ascii_digit()));
+            if !before || !group || chars.get(i + 4).is_some_and(|c| c.is_ascii_digit()) {
+                return None;
+            }
+        }
+    }
+    let t: String = t.chars().filter(|c| !matches!(c, ',' | '_' | '\'' | '’')).collect();
+    let t = t.strip_prefix("1:").or_else(|| t.strip_prefix("1/")).unwrap_or(&t);
+    let (num, unit) = match (t.strip_suffix('k'), t.strip_suffix('m')) {
+        (Some(n), _) => (n, 1e3),
+        (_, Some(n)) => (n, 1e6),
+        _ => (t, 1.0),
+    };
+    let mut groups = num.split('.');
+    let grouped = unit == 1.0
+        && groups.next().is_some_and(|g| (1..=3).contains(&g.len()))
+        && num.contains('.')
+        && groups.all(|g| g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit()));
+    let num = if grouped { num.replace('.', "") } else { num.to_string() };
+    if !num.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    let v = num.parse::<f64>().ok()? * unit;
+    (v.is_finite() && v >= 1.0).then_some(v)
 }
 
 /// Global keyboard shortcuts.
@@ -784,6 +841,36 @@ pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_scales_read_as_people_write_them() {
+        for (text, want) in [
+            ("1:12,345", 12_345.0),
+            ("1:12345", 12_345.0),
+            ("1 : 25 000", 25_000.0),
+            ("1/50000", 50_000.0),
+            ("12345", 12_345.0),
+            ("12'345", 12_345.0),
+            ("12.345", 12_345.0),
+            ("1.234.567", 1_234_567.0),
+            // A dot before exactly three digits groups thousands; otherwise it's a decimal point.
+            ("1.234", 1_234.0),
+            ("1.5", 1.5),
+            ("12.5", 12.5),
+            ("25k", 25_000.0),
+            ("2.5M", 2_500_000.0),
+            ("1:1", 1.0),
+            ("  7500  ", 7_500.0),
+        ] {
+            assert_eq!(parse_scale(text), Some(want), "{text}");
+        }
+        for text in [
+            "", "1:", "abc", "0", "1:0", "-5000", "1:-5000", "inf", "NaN", "12.34.5", "k", "1e5", "1:5e300", "0.5", "1:2,5m", "1:12,34",
+            ",345", "12,3456",
+        ] {
+            assert_eq!(parse_scale(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn header_without_a_unified_title_bar_keeps_its_usual_size() {
