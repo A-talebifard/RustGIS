@@ -1759,6 +1759,32 @@ fn modify_tools_snapping_topology_relationships_and_elevation() {
     assert!(s.run("edit.setGeometry", &json!({"layer": "Paths", "row": 0, "geometry": {"type": "Point", "coordinates": [0, 0]}})).is_err());
     s.run("edit.setGeometry", &json!({"layer": "Paths", "row": 0, "geometry": {"type": "LineString", "coordinates": [[0, 0], [0, 1]]}}))
         .unwrap();
+    // Vertex editing (the Edit Vertices tool): insert, move and delete, one undo step each.
+    let line = |s: &Session| match s.map().layer_by_name("Paths").unwrap().dataset.features[0].geometry.as_ref().unwrap() {
+        rustgis_data::Geometry::Line(p) => p[0].iter().map(|c| [c.x, c.y]).collect::<Vec<_>>(),
+        _ => panic!("not a line"),
+    };
+    let r = s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "insert", "index": 0, "lon": 0.5, "lat": 0.5})).unwrap();
+    assert_eq!(r["index"], 1, "the new vertex");
+    assert_eq!(line(&s), [[0.0, 0.0], [0.5, 0.5], [0.0, 1.0]]);
+    s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "move", "index": 2, "lon": 1, "lat": 1})).unwrap();
+    assert_eq!(line(&s), [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]);
+    s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "delete", "index": 1})).unwrap();
+    assert_eq!(line(&s), [[0.0, 0.0], [1.0, 1.0]]);
+    assert!(s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "delete", "index": 1})).is_err(), "a line keeps two");
+    assert!(s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "move", "index": 7, "lon": 1, "lat": 1})).is_err());
+    assert!(s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "move", "index": 0, "lon": 1e9, "lat": 1})).is_err());
+    for bad in [json!(-1), json!("2"), json!(0.5)] {
+        assert!(
+            s.run("edit.vertex", &json!({"layer": "Paths", "row": 0, "action": "move", "part": bad, "index": 0, "lon": 1, "lat": 1}))
+                .is_err(),
+            "part {bad}"
+        );
+    }
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(line(&s), [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]], "undo brings the deleted vertex back");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(line(&s), [[0.0, 0.0], [0.5, 0.5], [0.0, 1.0]]);
     // Traverse: two legs from a start, ground to grid off and on.
     s.run("layer.select", &json!({"layer": "Paths"})).unwrap();
     let r = s
@@ -1784,6 +1810,13 @@ fn modify_tools_snapping_topology_relationships_and_elevation() {
     let on = s.run("edit.snap", &json!({"lon": 20.0001, "lat": 0.0001})).unwrap();
     assert_eq!(on["snapped"], true);
     assert!((on["lon"].as_f64().unwrap() - 20.0).abs() < 1e-9 && on["lat"].as_f64().unwrap().abs() < 1e-9, "{on}");
+    // A dragged vertex doesn't snap to the feature it belongs to.
+    s.run("map.goToXY", &json!({"lon": 0.5, "lat": 0.5, "scale": 50_000})).unwrap();
+    let paths = s.map().layer_by_name("Paths").unwrap().id;
+    let near = rustgis_geom::Coord::new(0.5001, 0.5001);
+    let own = crate::cmd::design::snap_except(&mut s, near, None).map(|(c, _)| c);
+    assert!(own.is_some_and(|c| (c.x - 0.5).abs() < 1e-9 && (c.y - 0.5).abs() < 1e-9), "the line's own vertex: {own:?}");
+    assert_eq!(crate::cmd::design::snap_except(&mut s, near, Some((paths, 0))), None);
     // Topology: overlapping countries? Lakes inside countries? Dangling paths.
     s.run("topology.rules", &json!({"add": {"rule": "mustNotHaveDangles", "layer": "Paths"}})).unwrap();
     s.run("topology.rules", &json!({"add": {"rule": "mustBeCoveredBy", "layer": "Cities", "by": "Countries"}})).unwrap();
