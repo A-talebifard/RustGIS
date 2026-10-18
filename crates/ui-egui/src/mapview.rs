@@ -355,7 +355,7 @@ fn split_view(app: &mut RustGisApp, ui: &mut Ui, other: usize, rect: Rect, t: &T
     let Some(m) = app.session.project.maps.get_mut(other) else { return };
     let view = View { width: w, height: h, pixels_per_point: ppp as f64, camera: m.camera, sky: true };
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, c32(m.basemap.palette().0));
+    painter.rect_filled(rect, 0.0, c32(m.palette().0));
     let key = [
         other as f64,
         revision as f64,
@@ -740,7 +740,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     let painter = ui.painter_at(rect);
     // Behind the (possibly shifted or shrunk) last frame: the map's own background, so zooming
     // out never shows a band of window colour around it.
-    let basemap = app.session.map().basemap;
+    let background = app.session.map().palette().0;
     if draped {
         app.map.drape.paint(ui.ctx(), &painter, rect, app.session.map(), ppp);
     } else if globe_view {
@@ -748,7 +748,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     } else if tilt_draped {
         app.map.tilt_drape.paint(&painter, rect, app.session.map());
     } else {
-        painter.rect_filled(rect, 0.0, c32(basemap.palette().0));
+        painter.rect_filled(rect, 0.0, c32(background));
     }
     let old = app.map.tex_camera;
     let tex_rect = tex_rect(app, cam, rect, globe_view);
@@ -1695,6 +1695,10 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
             p.circle_stroke(*s, 3.5, Stroke::new(1.5, color));
         }
         if matches!(tool, Tool::Measure | Tool::MeasureArea) && pts.len() >= 2 {
+            // On the map's body.
+            let body = app.session.map().body();
+            let geodesic_length_m = |pts: &[Coord]| body.length(geodesic_length_m(pts));
+            let geodesic_ring_area_m2 = |ring: &[Coord]| body.area(geodesic_ring_area_m2(ring));
             let text = if tool == Tool::Measure {
                 let seg = pts.len().checked_sub(2).and_then(|i| pts.get(i..)).map(geodesic_length_m).unwrap_or(0.0);
                 crate::i18n::fmt(
@@ -1779,11 +1783,10 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
     }
     north_arrow(p, rect, t, bearing, pitch);
     // Attribution.
-    let mut att = String::from("Natural Earth");
-    for a in &app.map.attribution {
-        att.push_str(" | ");
-        att.push_str(a);
-    }
+    // The built-in world outline is Natural Earth's, drawn only on the Earth.
+    let earth = app.session.map().body().is_earth();
+    let att =
+        earth.then_some("Natural Earth").into_iter().chain(app.map.attribution.iter().map(String::as_str)).collect::<Vec<_>>().join(" | ");
     let g = p.layout(att, regular(10.5), t.text_dim, (rect.width() - 240.0).max(120.0));
     let r = Rect::from_min_size(pos2(rect.max.x - g.size().x - 14.0, rect.max.y - g.size().y - 6.0), g.size() + vec2(10.0, 4.0));
     p.rect_filled(r, CornerRadius::same(3), t.ribbon.gamma_multiply(0.75));

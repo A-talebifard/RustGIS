@@ -2675,13 +2675,18 @@ fn layer_effects_and_imagery_tools() {
     // Mensuration.
     let m = s.run("raster.measure", &json!({"layer": dem, "kind": "height", "points": [[10.0015, 45.0385], [10.0205, 45.0195]]})).unwrap();
     assert!(m["metres"].as_f64().unwrap() > 50.0, "{m}");
-    s.run(
-        "raster.measure",
-        &json!({"layer": dem, "kind": "volume", "points": [[10.015, 45.015], [10.025, 45.015], [10.025, 45.025], [10.015, 45.025]]}),
-    )
-    .unwrap();
+    let volume =
+        json!({"layer": dem, "kind": "volume", "points": [[10.015, 45.015], [10.025, 45.015], [10.025, 45.025], [10.015, 45.025]]});
+    let on_earth = s.run("raster.measure", &volume).unwrap()["cubicMetresAbove"].as_f64().unwrap();
     s.run("raster.measure", &json!({"kind": "area", "points": [[0, 0], [1, 0], [1, 1]]})).unwrap();
     assert_eq!(s.run("raster.measurements", &Value::Null).unwrap().as_array().unwrap().len(), 3);
+    // On Mars the degree cells of this raster are Mars' size: the same heights over a smaller
+    // ground (#223).
+    s.run("map.body", &json!({"name": "mars", "basemap": false})).unwrap();
+    let on_mars = s.run("raster.measure", &volume).unwrap()["cubicMetresAbove"].as_f64().unwrap();
+    let k = rustgis_geom::Body::get("mars").ratio();
+    assert!(on_earth > 0.0 && (on_mars / on_earth - k * k).abs() < 1e-9, "{on_earth} {on_mars}");
+    s.run("map.body", &json!({"name": "earth"})).unwrap();
     // Workspaces: an orthomosaic of two rasters, a DSM mosaic and its mesh.
     s.run("imagery.workspace", &json!({"kind": "ortho", "name": "Valley", "images": [dem, "dem_later"]})).unwrap();
     s.run("imagery.workspaceOptions", &json!({"name": "Valley", "cellSize": 0.002})).unwrap();
@@ -8876,6 +8881,80 @@ fn scripts_refuse_edits_to_streamed_layers() {
     assert!(l.is_streamed(), "the failed script kept nothing");
     assert_eq!(Some(l.dataset.features.len()), before);
     let _ = std::fs::remove_file(path);
+}
+
+/// A map on Mars (#223): the body switcher puts a Mars basemap under it, its measurements and
+/// scale are Mars', and the project keeps the body; back on the Earth the Mars basemap goes.
+#[test]
+fn celestial_bodies_set_the_basemap_and_the_measurements() {
+    let mut s = Session::new(Project::default());
+    let earth = |s: &mut Session| {
+        s.run("raster.measure", &json!({"kind": "distance", "points": [[0, 0], [90, 0]]})).unwrap()["metres"].as_f64().unwrap()
+    };
+    let on_earth = earth(&mut s);
+    let earth_scale = s.map().scale();
+    s.run("map.addTiles", &json!({"url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "id": "osm"})).unwrap();
+    let v = s.run("map.body", &json!({"name": "Mars"})).unwrap();
+    assert_eq!(v["body"], "mars");
+    assert_eq!(s.map().body().id, "mars");
+    // Mars' basemap replaces the Earth's.
+    let tiles = s.run("map.tiles", &Value::Null).unwrap();
+    let ids: Vec<&str> = tiles.as_array().unwrap().iter().filter_map(|t| t["id"].as_str()).collect();
+    assert_eq!(ids, ["planet-mars-viking-mdim21"]);
+    assert!(s.map().tiles.first().is_some_and(|t| t.tms));
+    // The built-in basemap's Earth land isn't drawn on Mars: a plain background under its tiles.
+    let (background, land, ..) = s.map().palette();
+    assert_eq!(background, land);
+    // A quarter of Mars' equator, and the scale of a smaller world.
+    let on_mars = earth(&mut s);
+    let k = rustgis_geom::Body::get("mars").ratio();
+    assert!((on_mars / on_earth - k).abs() < 1e-9 && (on_mars - std::f64::consts::FRAC_PI_2 * 3_389_526.7).abs() < 1.0, "{on_mars}");
+    assert!((s.map().scale() / earth_scale - k).abs() < 1e-9);
+    let area = s.run("raster.measure", &json!({"kind": "area", "points": [[0, 0], [1, 0], [1, 1]]})).unwrap();
+    // Leaving Mars without a new basemap still takes Mars' off.
+    s.run("map.body", &json!({"name": "earth", "basemap": false})).unwrap();
+    assert!(s.map().tiles.is_empty());
+    let earth_area = s.run("raster.measure", &json!({"kind": "area", "points": [[0, 0], [1, 0], [1, 1]]})).unwrap();
+    let ratio = area["squareMetres"].as_f64().unwrap() / earth_area["squareMetres"].as_f64().unwrap();
+    assert!((ratio - k * k).abs() < 1e-9, "{ratio}");
+    // Another of Mars' basemaps, named alone; saved and opened again, the map is still on Mars.
+    s.run("map.body", &json!({"basemap": "mars-hillshade"})).unwrap();
+    assert_eq!(s.map().body().id, "mars");
+    assert_eq!(s.map().tiles.len(), 1);
+    let text = serde_json::to_string(&s.project).unwrap();
+    let p = Project::from_json(&text).unwrap();
+    assert_eq!(p.maps.first().map(|m| m.body().id), Some("mars"));
+    // Back on the Earth the planetary basemap goes; an Earth map saves no body.
+    s.run("map.body", &json!({"name": "earth"})).unwrap();
+    assert!(s.map().tiles.is_empty() && s.map().body().is_earth());
+    assert!(!serde_json::to_string(&s.project).unwrap().contains("\"body\""));
+    // Undo goes back to Mars.
+    assert!(s.undo());
+    assert_eq!(s.map().body().id, "mars");
+    // Bad names and mismatches are refused, and nothing changes.
+    assert!(s.run("map.body", &json!({"name": "vulcan"})).is_err());
+    assert!(s.run("map.body", &json!({"name": "moon", "basemap": "mars-hillshade"})).is_err());
+    assert!(s.run("map.body", &json!({})).is_err());
+    assert_eq!(s.map().body().id, "mars");
+    let bodies = s.run("map.bodies", &Value::Null).unwrap();
+    assert_eq!(bodies["body"], "mars");
+    assert_eq!(bodies["bodies"].as_array().map(Vec::len), Some(rustgis_geom::BODIES.len()));
+    // A basemap the map has no room for (overlays fill it) fails, and the map stays as it was:
+    // on its body, with its tile layers.
+    let mut full = Session::new(Project::default());
+    for i in 0..rustgis_map::tiles::MAX_TILE_LAYERS {
+        full.run("map.addTiles", &json!({"url": format!("https://o{i}.example.com/{{z}}/{{x}}/{{y}}.png"), "overlay": true})).unwrap();
+    }
+    assert!(full.run("map.body", &json!({"name": "mars"})).is_err());
+    assert!(full.map().body().is_earth());
+    assert_eq!(full.map().tiles.len(), rustgis_map::tiles::MAX_TILE_LAYERS);
+    // A project naming an unknown body is on the Earth.
+    let odd = text.replace("\"body\":\"mars\"", "\"body\":\"vulcan\"");
+    assert_ne!(odd, text);
+    let p = Project::from_json(&odd).unwrap();
+    assert!(p.maps.first().is_some_and(|m| m.body().is_earth()));
+    // Saved again, it keeps the body's id (a newer version's, say).
+    assert!(serde_json::to_string(&p).unwrap().contains("\"body\":\"vulcan\""));
 }
 
 /// Text elements take italic, alignment and letter spacing (#213, point c): set when added or

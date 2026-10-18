@@ -10,7 +10,6 @@ use egui::epaint::Vertex;
 use egui::{Color32, Mesh, Painter, Rect, Shape, TextureFilter, TextureHandle, TextureOptions, pos2};
 use rustgis_engine::geom::{Coord, Extent};
 use rustgis_engine::map::camera::{Band, FAR};
-use rustgis_engine::map::projection::Flat;
 use rustgis_engine::map::{Camera, Map};
 use rustgis_engine::render::{self, ExtrudedShape, UprightMarker, View};
 
@@ -115,7 +114,7 @@ impl TiltDrape {
                         .flat_map(|j| (0..=n).map(move |i| (i, j)))
                         .map(|(i, j)| {
                             let m = b.camera.to_map(b.width * i as f64 / n as f64, b.height * j as f64 / n as f64, b.width, b.height);
-                            g.height(m).map_or(0.0, |h| h / Flat::Mercator.ground_per_unit(m).max(1e-9))
+                            g.height(m).map_or(0.0, |h| h / g.per_unit(m))
                         })
                         .collect()
                 })

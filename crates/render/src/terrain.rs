@@ -43,6 +43,8 @@ enum Heights {
 pub struct Ground {
     heights: Heights,
     exaggeration: f64,
+    /// The map's body's ground over the Earth's (#223): heights are metres on it.
+    body: f64,
 }
 
 impl Ground {
@@ -72,7 +74,7 @@ impl Ground {
                 }
             }
         };
-        Some(Ground { heights, exaggeration })
+        Some(Ground { heights, exaggeration, body: map.body().ratio() })
     }
 
     /// The ground's height (metres, exaggerated) at a Web Mercator point; `None` where nothing
@@ -93,8 +95,13 @@ impl Ground {
     /// there (Web Mercator stretches the ground toward the poles). 0 where nothing is known.
     pub fn up_px(&self, m: Coord, cam: &Camera) -> f64 {
         let Some(h) = self.height(m) else { return 0.0 };
-        let per_unit = rustgis_map::projection::Flat::Mercator.ground_per_unit(m).max(1e-9);
-        (h / per_unit / cam.res.max(1e-9)).clamp(-1e7, 1e7)
+        (h / self.per_unit(m) / cam.res.max(1e-9)).clamp(-1e7, 1e7)
+    }
+
+    /// The ground metres a map unit spans at `m` on the map's body (Web Mercator stretches the
+    /// ground toward the poles): a height over it is in map units.
+    pub fn per_unit(&self, m: Coord) -> f64 {
+        per_unit(m, self.body)
     }
 
     /// Whether elevation tiles are still on their way (drawing again later shows more).
@@ -217,9 +224,22 @@ fn pixel_height(pm: &tiny_skia::Pixmap, encoding: TerrainEncoding, fx: f64, fy: 
     Some(top + (bottom - top) * ty)
 }
 
+/// The ground metres a Web Mercator unit spans at `m` on a body `body` times the Earth's size.
+fn per_unit(m: Coord, body: f64) -> f64 {
+    (rustgis_map::projection::Flat::Mercator.ground_per_unit(m) * body).max(1e-9)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heights_stand_in_the_metres_of_the_body() {
+        // A metre on Mars spans more of the (Earth-sized) map than one on the Earth (#223).
+        let at = Coord::new(0.0, 0.0);
+        let mars = rustgis_geom::Body::get("mars").ratio();
+        assert!((per_unit(at, 1.0) / per_unit(at, mars) - 1.0 / mars).abs() < 1e-9);
+    }
 
     #[test]
     fn elevation_tiles_decode_their_heights() {

@@ -493,6 +493,15 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                     app.ui.layers_view = v;
                 }
             }
+            // The celestial body switcher, lit off the Earth (#223).
+            ui.add_space(6.0);
+            let body = app.session.map().body();
+            let tip = crate::i18n::fmt("Celestial body: {body}", &[("body", tl!(body.name))]);
+            let resp = view_button(ui, "planet", &tip, !body.is_earth(), t);
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(150.0);
+                crate::ribbon::body_menu(ui, app);
+            });
         });
     });
     if filtering && view == LayersView::DrawingOrder {
@@ -589,8 +598,9 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             });
         }
         // The basemap row at the bottom of the drawing order, like a desktop GIS (not a layer, so
-        // not while filtering).
-        if view == LayersView::DrawingOrder && !filtering {
+        // not while filtering). The built-in basemaps are the Earth's: on another body, its
+        // basemap is a tile layer, listed above.
+        if view == LayersView::DrawingOrder && !filtering && app.session.map().body().is_earth() {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.add_space(30.0);
