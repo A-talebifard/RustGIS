@@ -125,6 +125,17 @@ is ticked. The session is the project you have open, so an attached agent can't 
 are refused, with or without `--yes`. `edit.undo` and `edit.redo` work, in the same history as
 your own steps.
 
+Every tool call an attached agent makes is written to an audit log, one JSON line per call in a
+file per day (`2026-10-18.jsonl`) in the `mcp-audit` folder of the app-data folder
+(`~/.local/share/rustgis/mcp-audit` on Linux, `~/Library/Application Support/RustGIS/mcp-audit` on
+macOS, `%LOCALAPPDATA%\RustGIS\mcp-audit` on Windows). Each line holds `ts`, `source` (`mcp`),
+`tool`, `command` or `script` when there is one, `args`, `success`, `duration_s` and `error`.
+Passwords, keys and tokens in the arguments, a `run` script's lines included, are replaced before
+they are written. On Linux and macOS the folder and files are readable by you only; on Windows they're protected by
+your user profile's permissions. A batch's calls share the batch's
+`duration_s` and are marked `"batch": true`. An error whose text mentions a credential (a token, a
+password, a bearer…) is logged as withheld rather than risk keeping the credential. Days older than 30 are removed.
+
 An agent the app starts itself gets a run-scoped token instead of the relay's own:
 `rustgis-cli mcp --attach PORT --token-file FILE`. Each such grant carries its own file and network
 permission, and the app revokes it when it's done with the agent; that closes its connections and
@@ -235,6 +246,7 @@ These behavioral tests in `crates/assistant/src/relay.rs` check the requirements
 - Snapshots without the screen: `relay_draws_snapshots_offscreen_without_the_screen`
 - Saved snapshots need access: `relay_refuses_a_saved_snapshot_without_access`
 - The agent's last call, for the status bar: `relay_records_the_agents_last_call`
+- Audit log: `relay_writes_each_call_to_the_audit_log`
 - The open project stays the user's: `relay_keeps_project_commands_for_the_user`
 - Timed-out command never runs: `relay_cancels_a_timed_out_command_so_it_never_runs`
 - Stop cleanup: `relay_stop_closes_clients_and_removes_the_token`
