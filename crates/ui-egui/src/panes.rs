@@ -10,7 +10,9 @@ use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::{RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{ClassRef, ClassStyle, MAX_LABEL, MAX_UNIQUE, normalize_label};
 use rustgis_engine::map::tiles::TileLayer;
-use rustgis_engine::map::{ClassMethod, Layer, Marker, Ramp, RasterRenderer, Renderer, Resampling, Stretch, Symbol};
+use rustgis_engine::map::{
+    ClassMethod, Layer, Marker, Ramp, RampGroup, RasterDefaults, RasterRenderer, Renderer, Resampling, Stretch, Symbol,
+};
 use serde_json::{Value, json};
 
 use crate::theme::{Tokens, c32, regular, rgba, semibold};
@@ -3030,8 +3032,9 @@ fn field_combo(app: &mut RustGisApp, ui: &mut Ui, label: &str, cur: &str, fields
 fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(tl!("Color scheme")).size(11.5).color(t.text_dim));
-    let w = (ui.available_width() - 8.0) / 2.0;
     let grid = |app: &mut RustGisApp, ui: &mut Ui, id: &str, ramps: Vec<Ramp>| {
+        // Two to a row, in the width left inside the group's indent.
+        let w = (ui.available_width() - 8.0) / 2.0;
         egui::Grid::new(id).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             for (i, r) in ramps.iter().enumerate() {
                 // Built-in names are translated; a custom ramp's is the user's own.
@@ -3045,12 +3048,18 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
             }
         });
     };
-    grid(app, ui, "ramps", Ramp::ALL.to_vec());
+    // One collapsible list per group; the current scheme's group starts open.
     let custom: Vec<Ramp> = app.session.project.ramps.iter().map(|r| Ramp::Custom(Box::new(r.clone()))).collect();
-    if !custom.is_empty() {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(tl!("Custom")).size(11.5).color(t.text_dim));
-        grid(app, ui, "custom_ramps", custom);
+    for g in RampGroup::ALL {
+        let ramps: Vec<Ramp> =
+            if g == RampGroup::Custom { custom.clone() } else { Ramp::ALL.into_iter().filter(|r| r.group() == g).collect() };
+        if ramps.is_empty() {
+            continue;
+        }
+        egui::CollapsingHeader::new(egui::RichText::new(tl!(g.label())).size(11.5).color(t.text_dim))
+            .id_salt(("ramp_group", g.label()))
+            .default_open(cur.group() == g)
+            .show(ui, |ui| grid(app, ui, g.label(), ramps));
     }
     if ui
         .small_button(tl!("Add Color Ramp File…"))
@@ -3059,6 +3068,38 @@ fn ramp_picker(app: &mut RustGisApp, ui: &mut Ui, cur: &Ramp, t: &Tokens) {
     {
         let _ = app.run("ui.openItem", json!({"kind": "ramps"}));
     }
+}
+
+/// Save as Default and Reset Default: how single-band rasters added from now on are drawn.
+fn raster_default_buttons(app: &mut RustGisApp, ui: &mut Ui, style: &RasterStyle) {
+    let custom = matches!(style.stretch, Stretch::Custom { .. });
+    ui.horizontal(|ui| {
+        let tip = if custom {
+            tl!("A custom stretch is in this raster's own units: pick another stretch type to save it as the default.")
+        } else {
+            tl!("Draw single-band rasters added from now on with this color scheme, stretch and resampling.")
+        };
+        if ui
+            .add_enabled(!custom, egui::Button::new(tl!("Save as Default")).small())
+            .on_hover_text(tip)
+            .on_disabled_hover_text(tip)
+            .clicked()
+        {
+            match app.run("raster.setDefaultStyle", json!({"fromLayer": true})) {
+                Ok(_) => app.session.notify(tl!("Saved as the default style for new single-band rasters."), false),
+                Err(e) => app.session.notify(e, true),
+            }
+        }
+        let changed = app.session.raster_defaults != RasterDefaults::default();
+        if ui
+            .add_enabled(changed, egui::Button::new(tl!("Reset Default")).small())
+            .on_hover_text(tl!("Draw new single-band rasters with the inverted grey stretch again."))
+            .clicked()
+            && let Err(e) = app.run("raster.setDefaultStyle", json!({"reset": true}))
+        {
+            app.session.notify(e, true);
+        }
+    });
 }
 
 /// Where a class colour being dragged in the Symbology pane's picker waits (#314).
@@ -3736,6 +3777,9 @@ fn raster_symbology(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
             }
         });
     });
+    if matches!(style.renderer, RasterRenderer::Stretch { .. }) {
+        raster_default_buttons(app, ui, &style);
+    }
     raster_masking(app, ui, l, &d, &style, t);
     ui.add_space(6.0);
     egui::Frame::NONE.stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::same(6)).show(
