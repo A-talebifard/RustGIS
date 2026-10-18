@@ -3,7 +3,8 @@
 //! A plugin command (`plugin:<plugin>/<command>`) runs through [`Session::run`] like any other:
 //! one undo step, restored if it fails. While it runs, the plugin reaches the project through
 //! the requests [`Bridge`] answers: RustGIS commands by id, and a few `host.*` requests for
-//! reading layers. What it may run depends on the permissions it declared.
+//! reading layers and fetching documents (`host.fetch`, see [`fetch`]). What it may run depends
+//! on the permissions it declared.
 
 use std::sync::Arc;
 
@@ -12,6 +13,9 @@ use serde_json::{Value, json};
 
 use super::{b, ps, uint};
 use crate::{CmdResult, CommandSpec as C, Session};
+
+#[path = "plugin_fetch.rs"]
+pub mod fetch;
 
 pub fn commands() -> Vec<C> {
     vec![
@@ -342,6 +346,8 @@ fn refused(plugin: &Plugin, spec: &C, params: &Value) -> Option<String> {
 struct Bridge<'a> {
     s: &'a mut Session,
     plugin: Arc<Plugin>,
+    /// What this call fetched (`host.fetch`).
+    fetches: fetch::Calls,
     /// Whether a request could have changed the project (a command that mutates, a layer added).
     changed: bool,
 }
@@ -481,6 +487,11 @@ impl Host for Bridge<'_> {
                 Ok(Value::Null)
             }
             "host.addLayer" => self.add_layer(params),
+            "host.fetch" => {
+                // The address, and what the plugin answers, can carry what it read from the project.
+                self.need(Permission::Network, "fetch from the web")?;
+                self.fetches.fetch(params)
+            }
             _ if op.starts_with("host.") => Err(format!("unknown request '{op}'")),
             _ => self.command(op, params),
         }
@@ -508,6 +519,7 @@ impl Session {
         // and may answer the panel's new state. A failed command leaves the values as they were.
         let pid = plugin.manifest.id.clone();
         let panel = plugin.manifest.panel.clone();
+        let given = params;
         let mut params = params;
         let mut stripped;
         let (before, request) = match &panel {
@@ -530,11 +542,20 @@ impl Session {
         // The panel's state command runs each time the panel opens: when nothing it asked for
         // could change the project, it is no undo step. Other commands keep theirs.
         let state_command = panel.as_ref().is_some_and(|d| !d.state.is_empty() && d.state == cmd.decl.id);
+        let mut pending = Vec::new();
         let res = self.guarded(label, mutates, |s| {
-            let mut bridge = Bridge { s, plugin, changed: false };
+            let fetches = fetch::Calls::for_plugin(&plugin.manifest.id);
+            let mut bridge = Bridge { s, plugin, fetches, changed: false };
             let res = rustgis_plugins::run_command_with_panel(&cmd, &mut bridge, params, request);
+            if !bridge.fetches.pending.is_empty() {
+                // Waiting for a fetch (the browser): whatever the call did is undone, quietly,
+                // and the command runs again from the start once the answers are in.
+                pending = std::mem::take(&mut bridge.fetches.pending);
+                bridge.s.quiet_failure = true;
+                return Err(String::new());
+            }
             if res.is_ok() && state_command && !bridge.changed {
-                s.request_only = true;
+                bridge.s.request_only = true;
             }
             res
         });
@@ -552,6 +573,14 @@ impl Session {
                 }
                 _ => {}
             }
+        }
+        if pending.is_empty() {
+            return res;
+        }
+        // The panel's values went back with the failed call: the run again sets them again.
+        let res = self.retry_plugin(id, given, pending);
+        if let Err(e) = &res {
+            self.notify(e.clone(), true);
         }
         res
     }
