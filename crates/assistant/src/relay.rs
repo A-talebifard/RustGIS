@@ -31,6 +31,9 @@ use serde_json::Value;
 use crate::framing::{self, MAX_LINE, Oversize, read_message_max};
 use crate::mcp::{Server, expects_reply};
 
+mod http;
+pub use http::{HTTP_PATH, HTTP_PORT, HTTP_PORT_ENV, default_http_port, http_token, http_token_path};
+
 /// The port `rustgis-cli mcp --attach` connects to unless it names another. (GeoLibre's runner
 /// is 8766; the relay takes the next one.)
 pub const DEFAULT_PORT: u16 = 8767;
@@ -179,6 +182,8 @@ struct Shared {
     /// This run's own id (random, not secret), naming its grants' files: a grant left over from an
     /// earlier run on the same port can't remove a file of this one.
     run_id: String,
+    /// The port of MCP over HTTP beside the relay, while it runs ([`Relay::serve_http`]).
+    http_port: Mutex<Option<u16>>,
     /// Each agent (by the token it attached with): its name in the undo history and the layer
     /// it last made active, kept apart from the user's selection.
     agents: Mutex<HashMap<String, AgentState>>,
@@ -245,6 +250,7 @@ impl Shared {
             let _ = req.state.compare_exchange(PENDING, CANCELLED, SeqCst, SeqCst);
         }
         let _ = std::fs::remove_file(&self.token_file);
+        *lock(&self.http_port) = None;
         if let Some(path) = lock(&self.endpoint).take() {
             // Only if it is still this relay's: another app may have published its own since.
             let ours = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| {
@@ -576,6 +582,7 @@ impl Relay {
             granted: Mutex::new(HashMap::new()),
             grant_ids: AtomicU64::new(0),
             run_id: random_token()?.chars().take(8).collect(),
+            http_port: Mutex::new(None),
             agents: Mutex::new(HashMap::new()),
             screen: AtomicBool::new(false),
             shot: Mutex::new(None),
@@ -642,6 +649,9 @@ impl Relay {
             "version": env!("CARGO_PKG_VERSION"),
             "token_file": shared.token_file,
             "attach": format!("rustgis-cli mcp --attach {}", shared.port),
+            // MCP over HTTP, once it runs (the file is written again when it starts).
+            "http_url": lock(&shared.http_port).map(|p| format!("http://127.0.0.1:{p}{}", http::HTTP_PATH)),
+            "http_token_file": lock(&shared.http_port).and(http_token_path()),
         })
         .to_string();
         let tmp = write_private(&format!(".{name}.{}", std::process::id()), &text)?;

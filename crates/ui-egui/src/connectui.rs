@@ -73,6 +73,32 @@ fn resume_with(app: &mut RustGisApp, port: Result<u16, String>) {
         Err(e) => Err(e),
     };
     started(app, relay, bridge);
+    start_http(app);
+}
+
+/// Starts MCP over HTTP beside the relay ([`rustgis_assistant::relay::Relay::serve_http`]) for
+/// clients that speak HTTP, while agents are on. Says why when it can't; the relay works without.
+fn start_http(app: &mut RustGisApp) {
+    let Some(relay) = app.relay.clone() else { return };
+    if relay.http_port().is_some() {
+        return;
+    }
+    match relay.serve_http(rustgis_assistant::relay::default_http_port()) {
+        Ok(port) => {
+            let text = crate::i18n::fmt("MCP over HTTP on 127.0.0.1:{port}", &[("port", &port.to_string())]);
+            app.session.notify(text, false);
+        }
+        Err(e) => {
+            // Kept in the settings section too, not only a passing notice.
+            let said = crate::i18n::fmt("MCP over HTTP couldn't start: {error}", &[("error", &e)]);
+            app.session.notify(said.clone(), true);
+            // Beside the relay's own error, if it had one.
+            app.connect.error = Some(match app.connect.error.take() {
+                Some(before) => format!("{before}\n{said}"),
+                None => said,
+            });
+        }
+    }
 }
 
 /// Says how starting agents went, once: the relay's failure (with the bridge's, when both
@@ -186,7 +212,12 @@ pub fn section(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
             // on; without, the box and the remembered choice go back off.
             let bridge = start_bridge(app);
             let relay = app.run("ui.mcpRelay", json!({})).map(|_| ());
+            // Access as the box says before HTTP opens, as for the relay.
+            if let Some(relay) = &app.relay {
+                relay.set_allow_access(true);
+            }
             started(app, relay, bridge);
+            start_http(app);
             on = enabled(app);
         } else if let Err(e) = app.run("ui.mcpRelay", json!({"stop": true})) {
             app.connect.error = Some(e);
@@ -241,6 +272,18 @@ pub fn section(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) {
     let quoted = shell_arg(&cli);
     for agent in ["claude", "codex"] {
         copyable(ui, &format!("{agent} mcp add rustgis-app -- {quoted} {}", args.join(" ")));
+    }
+    // Clients that speak MCP over HTTP: registered with the stable token, kept off the screen.
+    if let Some(http) = app.relay.as_ref().and_then(|r| r.http_port()) {
+        let text = crate::i18n::fmt("Or, for agents that use MCP over HTTP (port {port}):", &[("port", &http.to_string())]);
+        ui.label(RichText::new(text).small());
+        // PowerShell runs a quoted program only through its call operator.
+        let call = if cfg!(windows) { "& " } else { "" };
+        let mut register = format!("{call}{quoted} mcp-register --client claude");
+        if http != rustgis_assistant::relay::HTTP_PORT {
+            register.push_str(&format!(" --port {http}"));
+        }
+        copyable(ui, &register);
     }
 }
 
