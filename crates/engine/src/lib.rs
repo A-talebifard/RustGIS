@@ -753,6 +753,25 @@ impl Session {
             // session's own flag says so, not the answer, which a plugin's command could forge.
             (Ok(_), Some(_)) if std::mem::take(&mut self.request_only) => {}
             (Ok(_), Some(mut snap)) => {
+                // An edit may change the dates the time slider's window filters on: bound layers
+                // whose features or fields the command changed (features are shared with the
+                // snapshot until written) take the window again.
+                for (i, m) in self.project.maps.iter_mut().enumerate() {
+                    // No slider (a layer pasted from a map with one): no window either.
+                    let window = m.time.as_ref().map(rustgis_map::time::TimeSlider::window);
+                    // Layer ids are a map's own: compared within the same map (any layer, when
+                    // maps came or went).
+                    let before = snap.maps.get(i).filter(|o| o.name == m.name).map(|o| o.layers.as_slice()).unwrap_or_default();
+                    for l in m.layers.iter_mut().filter(|l| l.time.is_some()) {
+                        let same = before.iter().find(|o| o.id == l.id).is_some_and(|o| {
+                            o.dataset.features.shares(&l.dataset.features) && o.dataset.fields == l.dataset.fields && o.time.is_some()
+                        });
+                        let rustgis_map::Layer { time, dataset, .. } = l;
+                        if let Some(b) = time.as_mut().filter(|_| !same) {
+                            b.apply(dataset, window);
+                        }
+                    }
+                }
                 // Undo keeps streamed layers' sources, not their windows: they read the view again.
                 strip_windows(&mut snap);
                 self.undo.push((snap, open_layout, label, self.actor.clone()));
@@ -970,6 +989,7 @@ impl Session {
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
+        self.keep_time_position(&cur);
         self.redo.push((cur, was, label, actor));
         self.touch_all_geometry();
         true
@@ -981,9 +1001,21 @@ impl Session {
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
         self.reopen_layout(open, saved);
+        self.keep_time_position(&cur);
         self.undo.push((cur, was, label, actor));
         self.touch_all_geometry();
         true
+    }
+
+    /// After undo or redo swaps the project: each map's time slider stays on the step it was
+    /// moved to (moving through time isn't an undo step), its other settings as restored.
+    fn keep_time_position(&mut self, before: &Project) {
+        for (m, old) in self.project.maps.iter_mut().zip(&before.maps).filter(|(m, o)| m.name == o.name) {
+            if let (Some(t), Some(at)) = (m.time.as_mut(), old.time.as_ref().map(|t| t.current)) {
+                t.go_to(at);
+                m.apply_time();
+            }
+        }
     }
 
     fn open_layout_name(&self) -> Option<String> {
