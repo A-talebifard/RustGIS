@@ -8,6 +8,7 @@ use tiny_skia::{Paint, Pixmap, Rect, Transform};
 use crate::fonts::CjkRegion;
 use crate::{PlacedLabel, View};
 use rustgis_map::Rgba;
+use rustgis_map::layout::TextAlign;
 
 fn font(bold: bool) -> Option<&'static FontRef<'static>> {
     static R: OnceLock<Option<FontRef<'static>>> = OnceLock::new();
@@ -135,9 +136,37 @@ pub fn block_height(text: &str, size: f32) -> f32 {
     size * 1.25 + line_count(text).saturating_sub(1) as f32 * line_pitch(size)
 }
 
+/// Whether a label is slanted or letter-spaced (a text graphic's, #535), drawn with
+/// [`styled_at`].
+fn styled(l: &PlacedLabel) -> bool {
+    l.italic || l.spacing != 0.0
+}
+
+/// How wide a line of `l` is laid out, in pixels at `ppp`: its advance, and its letter spacing
+/// between letters (not past the last), as the map view lays it out (#535), so a text is placed
+/// alike on screen and in an export. A slant's overhang isn't counted, as it isn't there either.
+fn line_width(l: &PlacedLabel, line: &str, ppp: f32) -> f32 {
+    let advance = measure(line, l.size, l.bold) * ppp;
+    if l.spacing == 0.0 {
+        return advance;
+    }
+    let letters = match font(l.bold) {
+        Some(_) => shape(line, l.size * 1.33 * ppp, l.bold).0.len(),
+        None => line.chars().count(),
+    };
+    // Letters drawn tighter than their own width (the most negative spacing) don't make it less
+    // than nothing.
+    (advance + l.spacing * 1.33 * ppp * letters.saturating_sub(1) as f32).max(0.0)
+}
+
+/// A label's width in points: its widest line as [`draw`] lays it out, its style included.
+pub fn label_width(l: &PlacedLabel) -> f32 {
+    lines(&l.text).map(|line| line_width(l, line, 1.0)).fold(0.0, f32::max)
+}
+
 /// The selection frame [`draw`] puts round a label, in points: [left, top, right, bottom].
 fn frame_box(l: &PlacedLabel) -> [f32; 4] {
-    let (w, pad) = (block_width(&l.text, l.size, l.bold), 3.0);
+    let (w, pad) = (label_width(l), 3.0);
     let h = l.size * 1.33 * 1.2 + line_count(&l.text).saturating_sub(1) as f32 * line_pitch(l.size);
     let cx = l.center_x();
     [cx - w / 2.0 - pad, l.y - h / 2.0 - pad, cx + w / 2.0 + pad, l.y + h / 2.0 + pad]
@@ -239,10 +268,10 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
 pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let px = l.size * 1.33 * ppp;
     let (cx, cy) = (l.center_x() * ppp, l.y * ppp);
-    // Several lines (#577) as the map view draws them: each from the left of a block as wide as
-    // the widest, the block centred on the label's point.
-    // Each line measured once: its width places it, the widest sizes the block.
-    let widths: Vec<(&str, f32)> = lines(&l.text).map(|line| (line, measure(line, l.size, l.bold) * ppp)).collect();
+    // Several lines (#577) as the map view draws them: each aligned in a block as wide as the
+    // widest (from its left unless a text graphic says otherwise, #535), the block centred on the
+    // label's point. Each line is measured once: its width places it, the widest sizes the block.
+    let widths: Vec<(&str, f32)> = lines(&l.text).map(|line| (line, line_width(l, line, ppp))).collect();
     let (n, line_h) = (widths.len(), line_pitch(l.size) * ppp);
     let w = widths.iter().map(|(_, lw)| *lw).fold(0.0, f32::max);
     if l.framed {
@@ -252,21 +281,40 @@ pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
         }
     }
     let top = cy - n.saturating_sub(1) as f32 * line_h / 2.0;
-    let placed: Vec<(&str, f32, f32)> =
-        widths.iter().enumerate().map(|(i, (line, lw))| (*line, cx - w / 2.0 + lw / 2.0, top + i as f32 * line_h)).collect();
+    // Each line: its text, its left edge (where the pen starts), its width, its centre y.
+    let placed: Vec<(&str, f32, f32, f32)> = widths
+        .iter()
+        .enumerate()
+        .map(|(i, (line, lw))| {
+            let free = match l.line_align {
+                TextAlign::Left => 0.0,
+                TextAlign::Center => (w - lw) / 2.0,
+                TextAlign::Right => w - lw,
+            };
+            (*line, cx - w / 2.0 + free, *lw, top + i as f32 * line_h)
+        })
+        .collect();
+    let (styled, spacing) = (styled(l), l.spacing * 1.33 * ppp);
+    let put = |pm: &mut Pixmap, &(line, left, lw, y): &(&str, f32, f32, f32), color: Rgba, (dx, dy): (f32, f32)| {
+        if styled {
+            styled_at(pm, line, left + dx, y + dy, px, color, l.bold, l.italic, spacing);
+        } else {
+            draw_text(pm, line, left + lw / 2.0, y, px, color, l.bold, (dx, dy));
+        }
+    };
     // Every line's halo first, so none covers the line above it.
     if let Some(h) = l.halo {
         let r = 1.2 * ppp;
         let ring =
             [(-r, 0.0), (r, 0.0), (0.0, -r), (0.0, r), (-r * 0.7, -r * 0.7), (r * 0.7, r * 0.7), (-r * 0.7, r * 0.7), (r * 0.7, -r * 0.7)];
-        for (line, x, y) in &placed {
+        for line in &placed {
             for offset in ring {
-                draw_text(pm, line, *x, *y, px, h, l.bold, offset);
+                put(pm, line, h, offset);
             }
         }
     }
-    for (line, x, y) in &placed {
-        draw_text(pm, line, *x, *y, px, l.color, l.bold, (0.0, 0.0));
+    for line in &placed {
+        put(pm, line, l.color, (0.0, 0.0));
     }
 }
 
@@ -316,6 +364,9 @@ pub fn scale_bar(pm: &mut Pixmap, view: &View, ground_per_pt: f64) {
         icon: None,
         align: 0.0,
         framed: false,
+        italic: false,
+        spacing: 0.0,
+        line_align: TextAlign::Left,
     };
     draw(pm, &label, ppp);
 }
