@@ -183,6 +183,20 @@ def test_adding_data_returns_the_layer(sample, tmp_path):
 
 def test_the_view(sample):
     sample.zoom_to(sample["Cities"])
+    # Two layers that each reach past the other (Countries reaches the poles, past Web Mercator).
+    cities, rivers = sample["Cities"], sample["Rivers"]
+    assert cities.bounds[1] < rivers.bounds[1] and rivers.bounds[3] > cities.bounds[3]
+    sample.zoom_to([cities, rivers])
+    west, south, east, north = sample.bounds
+    for w, s, e, n in (cities.bounds, rivers.bounds):
+        assert west <= w and south <= s and east >= e and north >= n
+    with pytest.raises(TypeError):
+        sample.zoom_to(True)
+    with pytest.raises(TypeError):
+        sample.zoom_to((0, 0))
+    sample.zoom_to(v for v in (0, 0, 10, 10))
+    with pytest.raises(TypeError):
+        sample.zoom_to((0, 0, 10, "north"))
     sample.zoom_to((0, 0, 10, 10))
     west, south, east, north = sample.bounds
     assert west <= 0 and east >= 10 and south <= 0 and north >= 10
