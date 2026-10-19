@@ -53,6 +53,15 @@ pub struct LayoutView {
     zoom: f32,
     pan: egui::Vec2,
     pub selected: Option<u32>,
+    /// The selection the Format pane last opened for, by layout and element (ids are per layout):
+    /// a new one opens it again, so closing the pane keeps the selection without the pane coming
+    /// back by itself.
+    formatted: Option<(usize, u32)>,
+    /// The element whose fields the Format pane drew this frame, by layout and element: text
+    /// typed into any other is saved at the end of the frame (`save_drafts`).
+    drawn: Option<(usize, u32)>,
+    /// The project (`Session::opened`) the selection and the text being typed are for.
+    project: Option<u64>,
     drag: Option<Drag>,
     /// The page rectangle and points per millimetre the drag last saw.
     drag_page: Option<(Rect, f32)>,
@@ -78,6 +87,20 @@ pub struct LayoutView {
     /// removed), the frame, the factor on its scale, the page point (mm) kept under the pointer,
     /// and when the wheel last turned (seconds).
     frame_zoom: Option<(String, u32, f64, (f64, f64), f64)>,
+}
+
+/// Forgets the selection and the text typed into its fields once another project has replaced
+/// the one they were for: its elements may have the same ids. Run after every command, after
+/// what agents and scripts sent, and before drafts are saved.
+pub(crate) fn follow_project(app: &mut RustGisApp) {
+    let opened = app.session.opened;
+    if app.layout.project.is_some_and(|p| p != opened) {
+        app.layout.selected = None;
+        app.layout.formatted = None;
+        app.layout.drawn = None;
+        app.layout.typing.clear();
+    }
+    app.layout.project = Some(opened);
 }
 
 /// Seconds after the wheel stops before a map frame's zoom is applied.
@@ -374,17 +397,19 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
     if app.layout.selected.is_some_and(|id| layout.element(id).is_none()) {
         app.layout.selected = None;
     }
-    save_drafts(app, li);
-    if app.layout.selected.is_some() {
-        egui::Panel::right("layout_props")
-            .resizable(false)
-            .exact_size(270.0)
-            .show_separator_line(true)
-            .show(ui, |ui| egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| properties(app, ui, &layout, li)));
+    // Selecting an element shows its properties in the Format pane (#516). The pane is drawn
+    // before the page, so it shows them from the next frame.
+    let selected = app.layout.selected.map(|id| (li, id));
+    if selected != app.layout.formatted {
+        app.layout.formatted = selected;
+        if selected.is_some() {
+            app.ui.open_right(crate::RightPane::Format);
+            ui.ctx().request_repaint();
+        }
     }
     let area = ui.available_rect_before_wrap();
-    // A stable id: dragging an element selects it and opens the properties beside the page,
-    // and an automatic id would change with them, losing the drag before it is dropped (#325).
+    // A stable id: dragging an element selects it and opens the Format pane beside the page,
+    // and an automatic id would change with it, losing the drag before it is dropped (#325).
     ui.advance_cursor_after_rect(area);
     let resp = ui.interact(area, ui.id().with("layout_page"), Sense::click_and_drag());
     let painter = ui.painter_at(area);
@@ -685,6 +710,10 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, layout: &L
         && resp.interact_pointer_pos().is_none_or(|pos| ruler_at(&app.layout, resp.rect, pos).is_none())
     {
         app.layout.selected = layout.hit(p.0, p.1);
+        // A click on the element already selected brings back the pane closed over it.
+        if app.layout.selected.is_some_and(|id| app.layout.formatted == Some((li, id))) {
+            app.ui.open_right(crate::RightPane::Format);
+        }
     }
     if resp.double_clicked()
         && let Some(id) = app.layout.selected
@@ -835,10 +864,12 @@ fn finish_frame(app: &mut RustGisApp, li: usize, shape: &str) {
     }
 }
 
-/// Saves the text typed into fields that are no longer shown: the selection or the layout changed
-/// before the field could notice it lost focus.
-fn save_drafts(app: &mut RustGisApp, li: usize) {
-    let shown = app.layout.selected.map(|id| (li, id));
+/// Saves the text typed into fields the Format pane didn't draw this frame: the selection or the
+/// layout changed, or the pane was closed or hidden, before the field could notice it lost focus.
+/// Runs once a frame, after the panes and the view.
+pub(crate) fn save_drafts(app: &mut RustGisApp) {
+    follow_project(app);
+    let shown = app.layout.drawn.take();
     let stale: Vec<_> = app.layout.typing.keys().filter(|(l, id, _)| Some((*l, *id)) != shown).copied().collect();
     for key in stale {
         let Some(text) = app.layout.typing.remove(&key) else { continue };
@@ -984,19 +1015,28 @@ fn grid_properties(app: &mut RustGisApp, ui: &mut Ui, grid: Option<&Grid>, id: u
     });
 }
 
+/// The Format pane (#516): the selected layout element's properties, while its layout is on
+/// screen. On the map (no layout open) or under the Model Builder, it waits for a selection.
+pub fn format(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    let on_screen = app.session.active_layout.filter(|_| !app.mb.shown());
+    let layout = on_screen.and_then(|li| Some((li, shown_layout(app, li)?)));
+    let selected = layout.as_ref().and_then(|(li, l)| Some((*li, app.layout.selected.filter(|id| l.element(*id).is_some())?)));
+    match (layout, selected) {
+        (Some((li, layout)), Some(drawn)) => {
+            app.layout.drawn = Some(drawn);
+            properties(app, ui, &layout, li);
+        }
+        _ => {
+            ui.label(egui::RichText::new(tl!("Select an element to format it.")).color(t.text_dim));
+        }
+    }
+}
+
 /// The selected element's properties.
 fn properties(app: &mut RustGisApp, ui: &mut Ui, layout: &Layout, li: usize) {
     let Some(e) = app.layout.selected.and_then(|id| layout.element(id)).cloned() else { return };
     let id = e.id;
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(tl!(e.kind.label())).font(semibold(14.0)));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::widgets::icon_button(ui, "close", tl!("Close")).clicked() {
-                app.layout.selected = None;
-            }
-        });
-    });
+    ui.label(egui::RichText::new(tl!(e.kind.label())).font(semibold(14.0)));
     ui.separator();
     let update = |app: &mut RustGisApp, p: Value| {
         let mut p = p;
@@ -1599,7 +1639,7 @@ mod tests {
                     fonts = true;
                     return;
                 }
-                super::show(app, ui);
+                with_format(app, ui);
             },
             app,
         );
@@ -1645,7 +1685,7 @@ mod tests {
                     fonts = true;
                     return;
                 }
-                super::show(app, ui);
+                with_format(app, ui);
             },
             app,
         );
@@ -1683,7 +1723,7 @@ mod tests {
                     fonts = true;
                     return;
                 }
-                super::show(app, ui);
+                with_format(app, ui);
             },
             app,
         );
@@ -1701,6 +1741,149 @@ mod tests {
         h.get_by_role_and_label(Role::CheckBox, "Rivers").click();
         h.run_steps(2);
         assert_eq!(left_out(&h), ["Cities"]);
+    }
+
+    /// The layout view with the Format pane beside it, as the app draws them: after following
+    /// what agents ran (`RustGisApp::logic`), and saving drafts at the end.
+    fn with_format(app: &mut RustGisApp, ui: &mut egui::Ui) {
+        super::follow_project(app);
+        let t = crate::theme::Tokens::get(ui.ctx());
+        if app.ui.right == Some(crate::RightPane::Format) {
+            egui::Panel::right("format_pane").exact_size(320.0).show(ui, |ui| super::format(app, ui, &t));
+        }
+        super::show(app, ui);
+        super::save_drafts(app);
+    }
+
+    /// Selecting an element opens the Format pane, a tab like the others (#516). Closing it keeps
+    /// the selection, and selecting another element brings it back.
+    #[test]
+    fn a_selected_element_is_formatted_in_its_pane() {
+        use crate::RightPane::{Bookmarks, Format};
+        use egui_kittest::kittest::Queryable;
+        let mut app = RustGisApp::with_sample();
+        app.run("layout.new", json!({"name": "Format"})).unwrap();
+        let li = app.session.active_layout.unwrap();
+        let ids: Vec<u32> = app.session.project.layouts[li].elements.iter().map(|e| e.id).collect();
+        app.run("ui.pane.bookmarks", json!({})).unwrap();
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                with_format(app, ui);
+            },
+            app,
+        );
+        h.run_steps(2);
+        assert_eq!(h.state().ui.right, Some(Bookmarks), "nothing selected, nothing opened");
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.run_steps(2);
+        assert!(h.query_by_label("Select an element to format it.").is_some(), "opened by hand: nothing to format");
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.state_mut().layout.selected = ids.first().copied();
+        h.run_steps(2);
+        assert_eq!(
+            (h.state().ui.right, h.state().ui.right_open.clone()),
+            (Some(Format), vec![Bookmarks, Format]),
+            "a tab beside the others"
+        );
+        assert!(h.query_all_by_label("Name").next().is_some(), "the element's properties");
+        // Closed: the selection stays, and the pane doesn't come back by itself.
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!((h.state().ui.right, h.state().layout.selected), (Some(Bookmarks), ids.first().copied()));
+        // Another element selected: it is back.
+        h.state_mut().layout.selected = ids.get(1).copied();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.right, Some(Format));
+        // A name being typed when the pane closes is kept, the element still selected.
+        use egui::accesskit::Role;
+        let name = |h: &egui_kittest::Harness<'_, RustGisApp>| h.state().session.project.layouts[li].element(ids[1]).unwrap().name.clone();
+        let before = name(&h);
+        h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some(before.as_str())).unwrap().focus();
+        h.run_steps(2);
+        h.query_all_by_role(Role::TextInput).find(|n| n.is_focused()).unwrap().type_text("Draft");
+        h.run_steps(2);
+        assert_eq!(name(&h), before, "still being typed");
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.run_steps(2);
+        assert!(name(&h).contains("Draft"), "saved when the pane closed: {}", name(&h));
+        assert_eq!(h.state().layout.selected, ids.get(1).copied());
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.run_steps(2);
+        // The layout out of sight, under the Model Builder or for the map: nothing to edit.
+        let hint = |h: &egui_kittest::Harness<'_, RustGisApp>| h.query_by_label("Select an element to format it.").is_some();
+        (h.state_mut().mb.open, h.state_mut().mb.active) = (true, true);
+        h.run_steps(2);
+        assert!(hint(&h), "under the Model Builder");
+        (h.state_mut().mb.open, h.state_mut().mb.active) = (false, false);
+        h.run_steps(2);
+        assert!(!hint(&h));
+        h.state_mut().run("layout.close", json!({})).unwrap();
+        h.run_steps(2);
+        assert!(hint(&h), "on the map");
+        assert_eq!(h.state().ui.right, Some(Format), "the pane stays, as other panes do");
+        // Closed, then the element of the same id selected in another layout: that is another
+        // element, so the pane opens for it.
+        h.state_mut().run("ui.pane.format", json!({})).unwrap();
+        h.state_mut().run("layout.new", json!({"name": "Other"})).unwrap();
+        let other = h.state().session.active_layout.unwrap();
+        assert!(h.state().session.project.layouts[other].element(ids[1]).is_some(), "the id exists there too");
+        h.state_mut().layout.selected = ids.get(1).copied();
+        h.run_steps(2);
+        assert_eq!(h.state().ui.right, Some(Format));
+    }
+
+    /// Text being typed when another project opens is for the old one: it never reaches the
+    /// element of the same id in the new one, whether the app opened it or an agent did through
+    /// the session itself (the MCP relay, the file bridge).
+    #[test]
+    fn a_draft_is_dropped_with_its_project() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        for by_agent in [false, true] {
+            let mut app = RustGisApp::with_sample();
+            app.run("layout.new", json!({"name": "Drafts"})).unwrap();
+            let li = app.session.active_layout.unwrap();
+            let title = app.session.project.layouts[li].elements.iter().find(|e| e.name == "Title").unwrap().id;
+            let text = serde_json::to_string(&app.session.project).unwrap();
+            app.layout.selected = Some(title);
+            let mut fonts = false;
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
+                move |ui, app: &mut RustGisApp| {
+                    if !fonts {
+                        crate::theme::install_fonts(ui.ctx(), &[], None);
+                        fonts = true;
+                        return;
+                    }
+                    with_format(app, ui);
+                },
+                app,
+            );
+            h.run_steps(3);
+            h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some("Title")).unwrap().focus();
+            h.run_steps(2);
+            h.query_all_by_role(Role::TextInput).find(|n| n.is_focused()).unwrap().type_text("Draft");
+            h.run_steps(2);
+            assert!(!h.state().layout.typing.is_empty(), "being typed");
+            let open = json!({"text": text});
+            if by_agent {
+                // As the relay runs an agent's command: on the session, past `RustGisApp::run`;
+                // the copy's layout opened in the same go.
+                h.state_mut().session.run("project.openText", &open).unwrap();
+                h.state_mut().session.run("layout.activate", &json!({"layout": li})).unwrap();
+            } else {
+                h.state_mut().run("project.openText", open).unwrap();
+            }
+            h.run_steps(2);
+            let app = h.state();
+            assert_eq!(app.session.project.layouts[li].element(title).map(|e| e.name.as_str()), Some("Title"), "agent: {by_agent}");
+            assert!(app.layout.typing.is_empty() && app.layout.selected.is_none(), "agent: {by_agent}");
+        }
     }
 
     /// Element ids are per layout: opening another layout ends the selection, so Delete or

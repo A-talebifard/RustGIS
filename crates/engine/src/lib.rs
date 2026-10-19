@@ -277,6 +277,10 @@ pub struct Session {
     pub registry: Registry,
     /// Bumped on every change so views can cache.
     pub revision: u64,
+    /// Bumped each time another project replaces this one (new, open, sample, template), however
+    /// the command came (the app, an agent, a script): the interface drops what it kept for the
+    /// old one.
+    pub opened: u64,
     pub tool: Tool,
     /// The layer selected in the Layers pane (the one the Style and Data tabs act on).
     pub active_layer: Option<u32>,
@@ -450,6 +454,7 @@ impl Session {
             raster_defaults: rustgis_map::RasterDefaults::default(),
             registry: Registry { commands: cmd::all() },
             revision: 1,
+            opened: 0,
             tool: Tool::Explore,
             active_layer: None,
             view_size: (1200.0, 720.0),
@@ -657,6 +662,9 @@ impl Session {
     pub(crate) fn guarded(&mut self, label: &'static str, mutates: bool, f: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
         let snapshot = mutates.then(|| self.project.clone());
         let open_layout = self.active_layout;
+        // The project's generation rolls back with it: a project opened part way (a plugin's
+        // command through its bridge) and then undone is the one before, still open.
+        let opened = self.opened;
         // Edit counts roll back with the project when a command fails part way.
         let counts = mutates.then(|| self.edit_counts.clone());
         self.request_only = false;
@@ -695,6 +703,7 @@ impl Session {
                 // the command opened on the way (a task's steps).
                 self.project = snap;
                 self.active_layout = open_layout;
+                self.opened = opened;
                 if let Some(c) = counts {
                     self.edit_counts = c;
                 }

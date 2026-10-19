@@ -383,6 +383,8 @@ pub enum RightPane {
     Sql,
     Directions,
     Bookmarks,
+    /// The selected layout element's properties (#516).
+    Format,
     /// A plugin's panel: the one `UiState::plugin_panel` names.
     Plugin,
 }
@@ -1312,6 +1314,9 @@ impl RustGisApp {
         if open_layout(self) != layout_before {
             self.layout.selected = None;
         }
+        // A project this command opened: a layout element's selection and the text typed into its
+        // fields stay with the old one.
+        layoutview::follow_project(self);
         if r.is_ok() && matches!(id, "edit.undo" | "edit.redo") {
             self.map.vertex = None;
             if let Some(before) = steps_before
@@ -1525,6 +1530,7 @@ impl RustGisApp {
             "ui.pane.directions" if p.get("from").is_some() || p.get("to").is_some() => navui::open_with(self, p),
             "ui.pane.directions" => toggle_right(&mut self.ui, RightPane::Directions),
             "ui.pane.bookmarks" => toggle_right(&mut self.ui, RightPane::Bookmarks),
+            "ui.pane.format" => toggle_right(&mut self.ui, RightPane::Format),
             // A plugin's panel: `{"id": plugin}`.
             "ui.pane.plugin" => return pluginpanel::open(self, p),
             // The SQL pane; with "sql" (and "database"), opened on that query, run with "run".
@@ -2911,6 +2917,8 @@ impl RustGisApp {
                 }
             }
         }
+        // A project an agent or a script opened, before the frame draws the old one's fields.
+        layoutview::follow_project(self);
         // Fonts installed last frame are active now.
         self.fonts_pending = false;
         i18n::set_current(self.lang());
@@ -3090,6 +3098,8 @@ impl RustGisApp {
                 mapview::show(self, ui);
             });
         }
+        // Text typed into a layout element's field the Format pane no longer shows.
+        layoutview::save_drafts(self);
         dialogs::show(self, &ctx);
         mapview::confirm_delete(self, &ctx);
         pluginsui::show(self, &ctx);
