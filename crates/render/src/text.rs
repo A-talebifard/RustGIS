@@ -95,12 +95,52 @@ fn shape(text: &str, px: f32, bold: bool) -> (Vec<(&'static FontRef<'static>, Gl
     (out, x)
 }
 
-/// Text width in points at `size` (font px ≈ size × 1.33 for point sizes).
+/// Most lines a label draws: its text comes from files and attributes.
+const MAX_LINES: usize = 200;
+
+/// The lines of a label, split as the map view splits them (#577): at each `\n`, a trailing one
+/// making an empty last line. Lines past [`MAX_LINES`] are left out (measured and drawn alike).
+pub fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n').take(MAX_LINES)
+}
+
+/// How many lines a label draws.
+pub fn line_count(text: &str) -> usize {
+    lines(text).count()
+}
+
+/// Text width in points at `size` (font px ≈ size × 1.33 for point sizes), drawn on one line.
 pub fn measure(text: &str, size: f32, bold: bool) -> f32 {
     if font(bold).is_none() {
         return text.chars().count() as f32 * size * 0.6;
     }
     shape(text, size * 1.33, bold).1
+}
+
+/// A label's width in points: its widest line, as [`draw`] lays its lines out (#577). Text drawn
+/// on one line (table cells, chart names…) is measured with [`measure`].
+pub fn block_width(text: &str, size: f32, bold: bool) -> f32 {
+    lines(text).map(|line| measure(line, size, bold)).fold(0.0, f32::max)
+}
+
+/// The distance between a label's lines in points, as [`draw`] sets them: 1.25 × the font's
+/// pixel size, as a layout's text.
+pub fn line_pitch(size: f32) -> f32 {
+    size * 1.33 * 1.25
+}
+
+/// A label's height in points, for its collision box: one line as labels have always taken, and
+/// a line pitch more for each further line.
+pub fn block_height(text: &str, size: f32) -> f32 {
+    size * 1.25 + line_count(text).saturating_sub(1) as f32 * line_pitch(size)
+}
+
+/// The selection frame [`draw`] puts round a label, in points: [left, top, right, bottom].
+fn frame_box(l: &PlacedLabel) -> [f32; 4] {
+    let (w, pad) = (block_width(&l.text, l.size, l.bold), 3.0);
+    let h = l.size * 1.33 * 1.2 + line_count(&l.text).saturating_sub(1) as f32 * line_pitch(l.size);
+    let cx = l.center_x();
+    [cx - w / 2.0 - pad, l.y - h / 2.0 - pad, cx + w / 2.0 + pad, l.y + h / 2.0 + pad]
 }
 
 fn blend(pm: &mut Pixmap, x: i32, y: i32, c: Rgba, cov: f32) {
@@ -199,21 +239,35 @@ pub fn styled_at(pm: &mut Pixmap, text: &str, left: f32, cy: f32, px: f32, color
 pub fn draw(pm: &mut Pixmap, l: &PlacedLabel, ppp: f32) {
     let px = l.size * 1.33 * ppp;
     let (cx, cy) = (l.center_x() * ppp, l.y * ppp);
+    // Several lines (#577) as the map view draws them: each from the left of a block as wide as
+    // the widest, the block centred on the label's point.
+    // Each line measured once: its width places it, the widest sizes the block.
+    let widths: Vec<(&str, f32)> = lines(&l.text).map(|line| (line, measure(line, l.size, l.bold) * ppp)).collect();
+    let (n, line_h) = (widths.len(), line_pitch(l.size) * ppp);
+    let w = widths.iter().map(|(_, lw)| *lw).fold(0.0, f32::max);
     if l.framed {
-        let (w, h, pad) = (measure(&l.text, l.size, l.bold) * ppp, px * 1.2, 3.0 * ppp);
-        if let Some(r) = Rect::from_xywh(cx - w / 2.0 - pad, cy - h / 2.0 - pad, w + 2.0 * pad, h + 2.0 * pad) {
+        let [x0, y0, x1, y1] = frame_box(l).map(|v| v * ppp);
+        if let Some(r) = Rect::from_ltrb(x0, y0, x1, y1) {
             frame(pm, r, ppp);
         }
     }
+    let top = cy - n.saturating_sub(1) as f32 * line_h / 2.0;
+    let placed: Vec<(&str, f32, f32)> =
+        widths.iter().enumerate().map(|(i, (line, lw))| (*line, cx - w / 2.0 + lw / 2.0, top + i as f32 * line_h)).collect();
+    // Every line's halo first, so none covers the line above it.
     if let Some(h) = l.halo {
         let r = 1.2 * ppp;
-        for (dx, dy) in
-            [(-r, 0.0), (r, 0.0), (0.0, -r), (0.0, r), (-r * 0.7, -r * 0.7), (r * 0.7, r * 0.7), (-r * 0.7, r * 0.7), (r * 0.7, -r * 0.7)]
-        {
-            draw_text(pm, &l.text, cx, cy, px, h, l.bold, (dx, dy));
+        let ring =
+            [(-r, 0.0), (r, 0.0), (0.0, -r), (0.0, r), (-r * 0.7, -r * 0.7), (r * 0.7, r * 0.7), (-r * 0.7, r * 0.7), (r * 0.7, -r * 0.7)];
+        for (line, x, y) in &placed {
+            for offset in ring {
+                draw_text(pm, line, *x, *y, px, h, l.bold, offset);
+            }
         }
     }
-    draw_text(pm, &l.text, cx, cy, px, l.color, l.bold, (0.0, 0.0));
+    for (line, x, y) in &placed {
+        draw_text(pm, line, *x, *y, px, l.color, l.bold, (0.0, 0.0));
+    }
 }
 
 /// The selection's frame: a light fill and an outline in the selection colour.
