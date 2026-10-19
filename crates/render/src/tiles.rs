@@ -11,6 +11,7 @@ use rustgis_map::{Map, Rgba, TileKind, TileLayer};
 use rustgis_tiles::{Frame, Kind, Spec};
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
+use crate::gpu_scene::{DrawCmd, TileQuad};
 use crate::raster::Place;
 use crate::{PlacedIcon, PlacedLabel, View};
 
@@ -62,8 +63,17 @@ pub fn style_view(t: &TileLayer) -> Result<Option<rustgis_tiles::style::StyleVie
     }
 }
 
-/// Draws the map's visible tile layers, bottom first.
-pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool) -> TileOutput {
+/// Where a GPU scene's tile layers go: raster tile layers as [`DrawCmd::Tiles`] in `cmds`,
+/// anything else drawn into the accumulator pixmap (`dirty` then set), which is flushed to `cmds`
+/// first so the layers keep their order.
+pub(crate) struct Gpu<'a> {
+    pub cmds: &'a mut Vec<DrawCmd>,
+    pub dirty: &'a mut bool,
+}
+
+/// Draws the map's visible tile layers, bottom first. With `gpu`, on the flat Web Mercator map,
+/// raster tile layers are placed as tiles for the GPU instead.
+pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels: bool, mut gpu: Option<Gpu<'_>>) -> TileOutput {
     let mut out = TileOutput::default();
     let layers: Vec<&TileLayer> = map.tiles.iter().rev().filter(|t| t.visible && t.opacity > 0.0).collect();
     if layers.is_empty() {
@@ -123,11 +133,38 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
             ppp,
         };
         let mut scratch = None;
+        // The tiles fetched (the view and the CPU path's margin), and those held for a moving
+        // camera (the GPU meshes' margin), from the cache only.
+        let fetch = crate::cull_extent(view, crate::CULL_MARGIN);
+        let reach = crate::cull_extent(view, crate::GPU_CULL_MARGIN);
+        let origin = [view.camera.center.x, view.camera.center.y];
         for t in layers {
+            if let Some(g) = gpu.as_mut()
+                && t.blend == Blend::Normal
+                && let Some(p) = rustgis_tiles::place(&spec(t), t.opacity, &frame, &fetch, &reach)
+            {
+                // What the accumulator holds goes first, under the tiles; with no room for a new
+                // accumulator the layer is drawn into this one instead.
+                let flushed = p.tiles.is_empty() || crate::flush_acc(pm, g.cmds, g.dirty).is_some();
+                if flushed {
+                    if !p.tiles.is_empty() {
+                        g.cmds.push(DrawCmd::Tiles { origin, tiles: p.tiles.iter().map(|q| quad(q, origin)).collect() });
+                    }
+                    let d = rustgis_tiles::Drawn { labels: Vec::new(), attribution: p.attribution, pending: p.pending, error: p.error };
+                    collect(d, &t.name, &mut out);
+                    continue;
+                }
+            }
             let d = draw_layer(pm, t, &frame, labels, &mut scratch);
+            if let Some(g) = gpu.as_mut() {
+                *g.dirty = true;
+            }
             collect(d, &t.name, &mut out);
         }
         return out;
+    }
+    if let Some(g) = gpu {
+        *g.dirty = true;
     }
     // Elsewhere: a mosaic in Web Mercator, warped into place.
     let (w, h) = (pm.width(), pm.height());
@@ -222,6 +259,24 @@ pub(crate) fn draw(pm: &mut Pixmap, map: &Map, view: &View, place: Place, labels
     out
 }
 
+/// A placed tile as the GPU draws it: its clipped square about `origin`, and the part of its
+/// picture in that square.
+fn quad(p: &rustgis_tiles::Placement, origin: [f64; 2]) -> TileQuad {
+    let (w, h) = (p.at.width().max(1e-9), p.at.height().max(1e-9));
+    let c = &p.clip;
+    TileQuad {
+        picture: p.picture.clone(),
+        rect: [(c.min_x - origin[0]) as f32, (c.min_y - origin[1]) as f32, (c.max_x - origin[0]) as f32, (c.max_y - origin[1]) as f32],
+        uv: [
+            ((c.min_x - p.at.min_x) / w) as f32,
+            ((p.at.max_y - c.max_y) / h) as f32,
+            ((c.max_x - p.at.min_x) / w) as f32,
+            ((p.at.max_y - c.min_y) / h) as f32,
+        ],
+        opacity: p.opacity,
+    }
+}
+
 /// Draws one tile layer into `pm`: straight in, or (blended) on a layer of its own composited
 /// with its blend mode over what's beneath. `scratch` holds that layer between calls, so the
 /// blended layers of one draw share one allocation.
@@ -292,13 +347,24 @@ mod tests {
 
     use crate::View;
 
-    /// Serves tiles and documents for `https://tiles.test/…` without a network.
+    /// Requests that are never answered: their tiles stay on their way.
+    static PARKED: std::sync::Mutex<Vec<rustgis_tiles::cache::Done>> = std::sync::Mutex::new(Vec::new());
+
+    /// Serves tiles and documents for `https://tiles.test/…` without a network. Under `split/`,
+    /// zoom 11 is red, zoom 13 blue, and zoom 12 never arrives.
     fn serve() {
         rustgis_tiles::cache::set_fetcher(|url, done| {
-            if url.starts_with("https://tiles.test/red/") {
+            let color = |r, g, b| {
                 let mut pm = tiny_skia::Pixmap::new(256, 256).unwrap();
-                pm.fill(tiny_skia::Color::from_rgba8(220, 20, 20, 255));
-                done(Ok(pm.encode_png().unwrap()));
+                pm.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
+                pm.encode_png().unwrap()
+            };
+            if url.starts_with("https://tiles.test/red/") || url.starts_with("https://tiles.test/split/11/") {
+                done(Ok(color(220, 20, 20)));
+            } else if url.starts_with("https://tiles.test/split/13/") {
+                done(Ok(color(20, 20, 220)));
+            } else if url.starts_with("https://tiles.test/split/12/") {
+                PARKED.lock().unwrap().push(done);
             } else if url == "https://tiles.test/style.json" {
                 let style = r##"{"version": 8, "sources": {}, "layers": [{"id": "bg", "type": "background", "paint": {"background-color": "#2050e0"}}]}"##;
                 done(Ok(style.as_bytes().to_vec()));
@@ -402,6 +468,125 @@ mod tests {
             let p = pm.pixel((x * 2.0) as u32, (y * 2.0) as u32).unwrap();
             assert!(p.red() > 120 && p.green() < 80 && p.blue() < 80, "({lon}, {lat}): {pole}° is {p:?}");
         }
+    }
+
+    /// On the GPU a raster tile layer is its tiles, placed on the map, rather than a picture of
+    /// the view: the tiles then move with the camera and the map stays sharp while it moves (#568).
+    #[test]
+    fn the_gpu_places_raster_tiles_on_the_map() {
+        use crate::gpu_scene::DrawCmd;
+        use crate::{Backend, RenderOutput};
+        serve();
+        let mut m = Map::new("Map");
+        m.graticule = false;
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.tiles.push(TileLayer::new("Red", TileKind::Raster, "https://tiles.test/red/{z}/{x}/{y}.png"));
+        let camera = Camera { center: lonlat_to_merc(Coord::new(10.0, 50.0)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 100.0, pixels_per_point: 1.0, camera, sky: false };
+        // Fetched first, out to the margin (as a camera that just moved there has): past the
+        // view only the tiles in the cache are placed.
+        crate::render_complete(&mut m, &View { width: 400.0, height: 200.0, ..view }).unwrap();
+        let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
+        assert!(!scene.cmds.iter().any(|c| matches!(c, DrawCmd::Image { .. })), "no picture of the view");
+        let tiles: Vec<_> = scene
+            .cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Tiles { origin, tiles } => Some((origin, tiles)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tiles.len(), 1);
+        let (origin, quads) = tiles[0];
+        for q in quads.iter() {
+            let p = q.pixmap().and_then(|pm| pm.pixel(10, 10)).unwrap();
+            assert_eq!([p.red(), p.green(), p.blue()], [220, 20, 20]);
+            assert!(q.uv.iter().all(|v| (0.0..=1.0).contains(v)) && q.uv[0] < q.uv[2] && q.uv[1] < q.uv[3], "{:?}", q.uv);
+            assert!(q.opacity == 1.0);
+        }
+        // The view and the margin a moving camera reaches are covered by tiles.
+        let held = crate::cull_extent(&view, crate::GPU_CULL_MARGIN);
+        let covered = |x: f64, y: f64| {
+            quads.iter().any(|q| {
+                let r = q.rect.map(f64::from);
+                x >= origin[0] + r[0] && x <= origin[0] + r[2] && y >= origin[1] + r[1] && y <= origin[1] + r[3]
+            })
+        };
+        for (fx, fy) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)] {
+            let (x, y) = (held.min_x + fx * held.width(), held.min_y + fy * held.height());
+            assert!(covered(x, y), "({fx}, {fy}) of the held extent");
+        }
+        // See-through, at the layer's opacity.
+        m.tiles[0].opacity = 0.5;
+        let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
+        assert!(scene.cmds.iter().all(|c| match c {
+            DrawCmd::Tiles { tiles, .. } => tiles.iter().all(|q| (q.opacity - 0.5).abs() < 1e-6),
+            DrawCmd::Image { .. } => false,
+            _ => true,
+        }));
+        // Blended, or a style that draws more than raster tiles: still a picture.
+        m.tiles[0].opacity = 1.0;
+        m.tiles[0].blend = rustgis_map::effects::Blend::Multiply;
+        let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
+        assert!(scene.cmds.iter().any(|c| matches!(c, DrawCmd::Image { .. })));
+        assert!(!scene.cmds.iter().any(|c| matches!(c, DrawCmd::Tiles { .. })));
+        m.tiles[0].blend = rustgis_map::effects::Blend::Normal;
+        m.tiles.insert(0, TileLayer::new("Blue", TileKind::Style, "https://tiles.test/style.json"));
+        crate::render_complete(&mut m, &view).unwrap();
+        let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &view, Backend::Gpu) else { panic!("a gpu scene") };
+        let kinds: Vec<bool> = scene.cmds.iter().map(|c| matches!(c, DrawCmd::Tiles { .. })).collect();
+        // The red tiles under the style's picture, in order.
+        assert_eq!(kinds, [true, false], "{kinds:?}");
+    }
+
+    /// A tile on its way is stood in for by its children already in the cache, which are sharper,
+    /// and by its parent only where they are missing: zooming in, the tiles of the zoom passed
+    /// through are missing while those of the zoom it ends at are often here (#568).
+    #[test]
+    fn children_in_the_cache_stand_in_over_the_parent() {
+        use crate::gpu_scene::DrawCmd;
+        use crate::{Backend, RenderOutput};
+        serve();
+        let mut m = Map::new("Map");
+        m.graticule = false;
+        m.basemap = rustgis_map::Basemap::Blank;
+        m.tiles.push(TileLayer::new("Split", TileKind::Raster, "https://tiles.test/split/{z}/{x}/{y}.png"));
+        // Zoom 12's own resolution, nudged off the tile grid.
+        let res = 2.0 * std::f64::consts::PI * rustgis_geom::MERCATOR_R / 256.0 / 4096.0;
+        let center = lonlat_to_merc(Coord::new(2.3417, 48.8571));
+        let view = |res: f64| View {
+            width: 200.0,
+            height: 100.0,
+            pixels_per_point: 1.0,
+            camera: Camera { center, res, bearing: 0.0, pitch: 0.0 },
+            sky: false,
+        };
+        // The parents and the children, fetched.
+        crate::render_png(&mut m, &View { width: 400.0, height: 200.0, ..view(res * 2.0) }).unwrap();
+        crate::render_png(&mut m, &View { width: 800.0, height: 400.0, ..view(res / 2.0) }).unwrap();
+        let v = view(res);
+        let r = crate::render(&mut m, &v).unwrap();
+        let p = r.pixmap.pixel(100, 50).unwrap();
+        let Some(RenderOutput::Gpu(scene)) = crate::render_backend(&mut m, &v, Backend::Gpu) else { panic!("a gpu scene") };
+        let Some(DrawCmd::Tiles { origin, tiles }) = scene.cmds.iter().find(|c| matches!(c, DrawCmd::Tiles { .. })) else {
+            panic!("tiles")
+        };
+        let over_centre: Vec<_> = tiles
+            .iter()
+            .filter(|q| {
+                let (x, y) = (center.x - origin[0], center.y - origin[1]);
+                f64::from(q.rect[0]) <= x && x <= f64::from(q.rect[2]) && f64::from(q.rect[1]) <= y && y <= f64::from(q.rect[3])
+            })
+            .map(|q| q.pixmap().and_then(|pm| pm.pixel(5, 5)).map(|c| c.blue()))
+            .collect();
+        let pending = r.tiles_pending;
+        // Answered now: other tests' renders wait for every fetch under way.
+        for done in std::mem::take(&mut *PARKED.lock().unwrap()) {
+            done(Err("404".into()));
+        }
+        assert!(pending, "zoom 12 is on its way");
+        assert_eq!([p.red(), p.green(), p.blue()], [20, 20, 220], "the children over the parent");
+        assert_eq!(over_centre, [Some(220)], "a child, and not the parent under it");
     }
 
     #[test]
