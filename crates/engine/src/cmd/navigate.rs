@@ -88,11 +88,22 @@ pub fn commands() -> Vec<C> {
         })
         .view(),
         C::new("map.projection", "Globe", "View › View", |s, p| {
+            // A preset's parameters, over those of `type` or of the map's own preset.
+            let mut given: Vec<(&str, f64)> = Vec::new();
+            for k in ["lon_0", "lat_1", "lat_2"] {
+                if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+                    given.push((k, v.as_f64().ok_or_else(|| format!("{k} is a number of degrees"))?));
+                }
+            }
             let m = s.map_mut();
-            let next = match ps(p, "type") {
-                Some(t) => Projection::from_code(t)?,
-                None if m.projection.is_globe() => Projection::WebMercator,
-                None => Projection::Globe,
+            let next = if given.is_empty() {
+                match ps(p, "type") {
+                    Some(t) => Projection::from_code(t)?,
+                    None if m.projection.is_globe() => Projection::WebMercator,
+                    None => Projection::Globe,
+                }
+            } else {
+                with_preset_params(&ps(p, "type").map_or_else(|| m.projection.code(), str::to_string), given)?
             };
             m.set_projection(next);
             let out = json!({"projection": m.projection.code(), "label": m.projection.label()});
@@ -101,7 +112,7 @@ pub fn commands() -> Vec<C> {
             }
             Ok(out)
         })
-        .params(r#"{"type"?: "mercator"|"globe"|preset id|"EPSG:<code>"|"ESRI:<code>" (toggles the globe when omitted)}"#),
+        .params(r#"{"type"?: "mercator"|"globe"|preset id (with parameters: "robinson +lon_0=150")|"EPSG:<code>"|"ESRI:<code>" (toggles the globe when omitted), "lon_0"?: degrees (a preset's central meridian), "lat_1"?, "lat_2"?: degrees (a conic preset's standard parallels; these apply to the map's own preset when type is omitted)}"#),
         C::new("map.projections", "Projections", "View › View", |_, _| {
             let mut v = vec![json!({"id": "mercator", "label": "Web Mercator"}), json!({"id": "globe", "label": "Globe"})];
             v.extend(rustgis_map::projection::PRESETS.iter().map(|(id, label, _)| json!({"id": id, "label": label})));
@@ -221,6 +232,20 @@ pub fn commands() -> Vec<C> {
         })
         .params(r#"{"name": string}"#),
     ]
+}
+
+/// Projection `base`, a preset with or without parameters, with `given` over its own values.
+fn with_preset_params(base: &str, given: Vec<(&str, f64)>) -> Result<Projection, String> {
+    use rustgis_map::projection::{parse_preset, preset_code};
+    let Some((id, mut params)) = parse_preset(base)? else {
+        let name = Projection::from_code(base).map_or_else(|_| base.to_string(), |p| p.label());
+        return Err(format!("only presets take lon_0, lat_1 and lat_2, not {name}"));
+    };
+    for (k, v) in given {
+        params.retain(|(q, _)| *q != k);
+        params.push((k, v));
+    }
+    Projection::from_code(&preset_code(id, &params))
 }
 
 fn s_name(p: &Value) -> Result<&str, String> {
