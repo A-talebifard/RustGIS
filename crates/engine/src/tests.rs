@@ -938,6 +938,7 @@ fn hostile_params_never_panic() {
         json!({"fileName": "a.tif", "data": "AAAA", "type": "unique", "on": "maybe"}),
         json!({"type": "custom", "min": 1e308, "max": -1e308}),
         json!({"kind": "colorbar", "ticks": -1e308, "tickSide": 7, "orientation": "x", "layer": "", "reverse": "maybe"}),
+        json!({"kind": "legend", "element": 1, "exclude": [null, 7, "", {"x": 1}]}),
         // MySQL addresses that can't be read, so nothing connects.
         json!({"database": "mysql://u:p#@[::1/x?ssl-mode=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
         json!({"database": "MARIADB://u@h:99999999/%zz?ssl-mode=VERIFY_CA&ssl-ca=/nonexistent", "sql": "SELECT 1"}),
@@ -9071,4 +9072,87 @@ fn undo_steps_remember_who_made_them() {
     assert_eq!((s.undo_actor(), s.redo_actor()), (Some(None), Some(Some("agent 1"))));
     s.run("edit.redo", &json!({})).unwrap();
     assert_eq!((s.undo_actor(), s.redo_actor()), (Some(Some("agent 1")), None));
+}
+
+/// A legend can leave layers out though the map draws them: set when added or later, checked
+/// against its frame's map, kept through a save (not written when empty), and following a
+/// renamed layer.
+#[test]
+fn legends_leave_layers_out() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Legends"})).unwrap();
+    let left_out = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Legend { exclude, .. }) => exclude.clone(),
+        _ => panic!("a legend"),
+    };
+    let plain = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap() as u32;
+    assert!(left_out(&s, plain).is_empty());
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    assert!(!saved.contains("exclude"), "an empty list isn't written");
+    // Names as the map spells them, once each.
+    let lakes = s.run("layout.addElement", &json!({"kind": "legend", "exclude": ["lakes", "LAKES", "Rivers"]})).unwrap()["element"]
+        .as_u64()
+        .unwrap() as u32;
+    assert_eq!(left_out(&s, lakes), ["Lakes", "Rivers"]);
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Rivers"]})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rivers"]);
+    // A layer the map hasn't, or not a list of names, is an error that changes nothing; so is
+    // `exclude` on another kind of element.
+    for bad in [json!(["Atlantis"]), json!("Rivers"), json!([3]), json!([null]), json!([""]), json!([{"x": 1}]), json!(["Rivers", 7])] {
+        assert!(s.run("layout.update", &json!({"element": lakes, "exclude": bad})).is_err(), "{bad}");
+        assert!(s.run("layout.addElement", &json!({"kind": "legend", "exclude": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(left_out(&s, lakes), ["Rivers"]);
+    let title = s.project.layouts[0].elements.iter().find(|e| e.name == "Title").unwrap().id;
+    assert!(s.run("layout.update", &json!({"element": title, "exclude": ["Rivers"]})).unwrap_err().contains("only legends"));
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "exclude": ["Rivers"]})).unwrap_err().contains("only legends"));
+    // Renaming the layer keeps it left out.
+    s.run("layer.rename", &json!({"layer": "Rivers", "name": "Rios"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"]);
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert!(back.element(lakes).is_some_and(|e| matches!(&e.kind, ElementKind::Legend { exclude, .. } if exclude == &["Rios"])));
+    // Names may repeat. Renaming Lakes onto a name already left out keeps it once; with two
+    // layers named Rios, removing one keeps the name left out for the other.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Rios", "Lakes"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Lakes", "name": "Rios"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"], "once each");
+    assert_eq!(s.map().layers.iter().filter(|l| l.name == "Rios").count(), 2);
+    let first = s.map().layers.iter().find(|l| l.name == "Rios").unwrap().id;
+    s.run("layer.remove", &json!({"layer": first})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Rios"], "the other Rios is still left out");
+    // Deleting the layer drops it from the list, so a later layer of that name is listed.
+    s.run("layer.remove", &json!({"layer": "Rios"})).unwrap();
+    assert!(left_out(&s, lakes).is_empty());
+    // An empty list lists every layer again.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Countries"]})).unwrap();
+    s.run("layout.update", &json!({"element": lakes, "exclude": []})).unwrap();
+    assert!(left_out(&s, lakes).is_empty());
+    // Removing a group with its layers drops them too.
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Cities", "Countries"]})).unwrap();
+    s.run("group.add", &json!({"name": "Places", "layers": ["Cities"]})).unwrap();
+    s.run("group.remove", &json!({"group": "Places"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Countries"]);
+    // A list past the cap is refused rather than cut short.
+    let many = vec!["Countries"; rustgis_map::layout::MAX_LEGEND_EXCLUDED + 1];
+    assert!(s.run("layout.update", &json!({"element": lakes, "exclude": many})).unwrap_err().contains("at most"));
+    assert_eq!(left_out(&s, lakes), ["Countries"]);
+    // A frame naming its map in another case (as an imported layout may) still takes a list and
+    // follows renames, as the renderer finds the map.
+    let lower = s.map().name.to_lowercase();
+    assert_ne!(lower, s.map().name);
+    for e in &mut s.project.layouts[0].elements {
+        if let ElementKind::MapFrame { map, .. } = &mut e.kind {
+            map.clone_from(&lower);
+        }
+    }
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["countries"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Countries", "name": "Nations"})).unwrap();
+    assert_eq!(left_out(&s, lakes), ["Nations"]);
+    // Renamed onto the name of a layer the legend lists, a layer left out is listed with it.
+    s.run("layer.addSample", &json!({"name": "lakes"})).unwrap();
+    s.run("layout.update", &json!({"element": lakes, "exclude": ["Lakes"]})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Nations", "name": "Countries"})).unwrap();
+    s.run("layer.rename", &json!({"layer": "Lakes", "name": "Countries"})).unwrap();
+    assert!(left_out(&s, lakes).is_empty(), "the other Countries isn't taken out");
 }
