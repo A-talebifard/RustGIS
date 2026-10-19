@@ -4324,6 +4324,19 @@ fn map_links() {
 /// and pitch once it has loaded; without it the map stays where it is.
 #[test]
 fn style_root_view_moves_the_map() {
+    if std::env::var_os("RUSTGIS_TEST_STYLE_VIEW").is_none() {
+        // Parallel reload tests clear the process-wide tile cache. Isolate these downloads:
+        // refetching after a reload can exhaust the fixture server's request allowance.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::style_root_view_moves_the_map", "--nocapture"])
+            .env("RUSTGIS_TEST_STYLE_VIEW", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("1 passed; 0 failed"), "the child must run the style-view test: {stdout}");
+        return;
+    }
     const STYLE: &[u8] = br#"{"version": 8, "center": [2.2945, 48.8584], "zoom": 16, "bearing": -20, "pitch": 55, "sources": {}, "layers": [{"id": "bg", "type": "background"}]}"#;
     let base = serve(STYLE, 5);
     let mut s = world();
@@ -4340,7 +4353,7 @@ fn style_root_view_moves_the_map() {
     assert!(s.style_view.is_none());
     let m = s.map();
     let c = m.center_lonlat();
-    assert!((c.x - 2.2945).abs() < 1e-6 && (c.y - 48.8584).abs() < 1e-6, "{c:?}");
+    assert!((c.x - 2.2945).abs() < 1e-6 && (c.y - 48.8584).abs() < 1e-6, "{c:?}; notices: {:?}", s.notices);
     assert_eq!((m.camera.bearing, m.camera.pitch), (-20.0, 55.0));
     assert_eq!(s.run("map.link", &Value::Null).unwrap()["hash"], "#16/48.8584/2.2945/-20/55");
     // Only a style has a view of its own.
@@ -9009,13 +9022,27 @@ fn celestial_bodies_set_the_basemap_and_the_measurements() {
     let text = serde_json::to_string(&s.project).unwrap();
     let p = Project::from_json(&text).unwrap();
     assert_eq!(p.maps.first().map(|m| m.body().id), Some("mars"));
-    // Back on the Earth the planetary basemap goes; an Earth map saves no body.
-    s.run("map.body", &json!({"name": "earth"})).unwrap();
-    assert!(s.map().tiles.is_empty() && s.map().body().is_earth());
+    s.run("map.addTiles", &json!({"url": rustgis_map::planets::EARTH_BASEMAP.url, "id": "overlay", "overlay": true, "opacity": 0.5}))
+        .unwrap();
+    // Back on the Earth the planetary basemap becomes USGS Imagery, keeping overlays;
+    // an Earth map saves no body.
+    let earth_view = s.run("map.body", &json!({"name": "earth"})).unwrap();
+    assert_eq!(earth_view["basemap"], "usgs-imagery");
+    assert!(s.map().body().is_earth());
+    let tiles = &s.map().tiles;
+    assert_eq!(tiles.len(), 2);
+    assert!(tiles.iter().any(|t| t.id == "overlay" && t.overlay && t.opacity == 0.5));
+    let imagery = tiles.iter().find(|t| !t.overlay).unwrap();
+    assert_eq!(imagery.id, rustgis_map::planets::EARTH_BASEMAP.id);
+    assert_eq!(imagery.url, rustgis_map::planets::EARTH_BASEMAP.url);
+    assert!(imagery.visible && !imagery.overlay && !imagery.tms);
+    assert_eq!(imagery.max_zoom, 16);
     assert!(!serde_json::to_string(&s.project).unwrap().contains("\"body\""));
     // Undo goes back to Mars.
     assert!(s.undo());
     assert_eq!(s.map().body().id, "mars");
+    assert!(s.map().tiles.iter().any(|t| t.id == "planet-mars-hillshade"));
+    assert!(s.map().tiles.iter().all(|t| t.id != "usgs-imagery"));
     // Bad names and mismatches are refused, and nothing changes.
     assert!(s.run("map.body", &json!({"name": "vulcan"})).is_err());
     assert!(s.run("map.body", &json!({"name": "moon", "basemap": "mars-hillshade"})).is_err());
@@ -9032,6 +9059,11 @@ fn celestial_bodies_set_the_basemap_and_the_measurements() {
     }
     assert!(full.run("map.body", &json!({"name": "mars"})).is_err());
     assert!(full.map().body().is_earth());
+    assert_eq!(full.map().tiles.len(), rustgis_map::tiles::MAX_TILE_LAYERS);
+    // The Earth's new default is also atomic when there is no room for its imagery.
+    full.run("map.body", &json!({"name": "moon", "basemap": false})).unwrap();
+    assert!(full.run("map.body", &json!({"name": "earth"})).is_err());
+    assert_eq!(full.map().body().id, "moon");
     assert_eq!(full.map().tiles.len(), rustgis_map::tiles::MAX_TILE_LAYERS);
     // A project naming an unknown body is on the Earth.
     let odd = text.replace("\"body\":\"mars\"", "\"body\":\"vulcan\"");
