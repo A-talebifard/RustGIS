@@ -7879,6 +7879,71 @@ fn a_failed_command_reopens_the_layout_open_before_it() {
     assert_eq!(s.active_layout.and_then(|i| s.project.layouts.get(i)).map(|l| l.name.as_str()), Some("A"));
 }
 
+/// Text graphics can be bold (#516): added, styled or edited so; a graphics layer made before the
+/// field reads as not bold and gains the field when one is made bold.
+#[test]
+fn text_graphics_can_be_bold() {
+    use rustgis_map::graphics;
+    let mut s = world();
+    let a = s.run("graphics.add", &json!({"shape": "text", "points": [[10, 50]], "text": "A", "bold": true})).unwrap();
+    let id = a["layer"].as_u64().unwrap() as u32;
+    let b = s.run("graphics.add", &json!({"shape": "text", "points": [[20, 40]], "text": "B", "layer": id})).unwrap();
+    let (ra, rb) = (a["row"].as_u64().unwrap() as usize, b["row"].as_u64().unwrap() as usize);
+    let ds = |s: &Session| s.map().layer(id).unwrap().dataset.clone();
+    assert!(graphics::bold(&ds(&s), ra) && !graphics::bold(&ds(&s), rb));
+    s.run("graphics.edit", &json!({"layer": id, "row": rb, "bold": true})).unwrap();
+    assert!(graphics::bold(&ds(&s), rb));
+    s.run("select.rows", &json!({"layer": id, "rows": [ra]})).unwrap();
+    s.run("graphics.style", &json!({"bold": false})).unwrap();
+    assert!(!graphics::bold(&ds(&s), ra));
+    // A layer from before the field: not bold, until made so.
+    let l = s.map_mut().layer_mut(id).unwrap();
+    let fi = l.dataset.field_index("bold").unwrap();
+    l.dataset.fields.remove(fi);
+    l.dataset.features.iter_mut().for_each(|f| {
+        f.attrs.remove(fi);
+    });
+    assert!(!graphics::bold(&ds(&s), rb));
+    s.run("graphics.edit", &json!({"layer": id, "row": rb, "bold": true})).unwrap();
+    assert!(graphics::bold(&ds(&s), rb) && !graphics::bold(&ds(&s), ra));
+}
+
+/// A text graphic is placed again by its points (dragged on the map, #516), as one undo step;
+/// other shapes move with `edit.move`.
+#[test]
+fn a_text_graphic_is_placed_again_by_its_points() {
+    let mut s = world();
+    let t = s.run("graphics.add", &json!({"shape": "text", "points": [[10, 50]], "text": "A"})).unwrap();
+    let id = t["layer"].as_u64().unwrap() as u32;
+    let row = t["row"].as_u64().unwrap() as usize;
+    let at = |s: &Session| s.map().layer(id).unwrap().dataset.features[row].geometry.as_ref().unwrap().label_point().unwrap();
+    s.run("graphics.edit", &json!({"layer": id, "row": row, "points": [[12, 48]]})).unwrap();
+    assert_eq!((at(&s).x, at(&s).y), (12.0, 48.0));
+    assert_eq!(s.undo_label(), Some("Edit Graphic"));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!((at(&s).x, at(&s).y), (10.0, 50.0));
+    let r = s.run("graphics.add", &json!({"shape": "rectangle", "points": [[0, 0], [5, 5]], "layer": id})).unwrap();
+    assert!(s.run("graphics.edit", &json!({"layer": id, "row": r["row"], "points": [[1, 1]]})).is_err());
+}
+
+/// A point, a text graphic's too, turns and scales on itself: Rotate and Scale leave it out, and
+/// with nothing else selected they change nothing and leave no undo step (#516).
+#[test]
+fn rotating_or_scaling_a_text_changes_nothing() {
+    let mut s = world();
+    let t = s.run("graphics.add", &json!({"shape": "text", "points": [[10, 50]], "text": "A"})).unwrap();
+    let layer = t["layer"].as_u64().unwrap();
+    s.run("select.rows", &json!({"layer": layer, "rows": [t["row"]]})).unwrap();
+    let label = s.undo_label();
+    assert!(s.run("edit.rotate", &json!({"angle": 34})).is_err());
+    assert!(s.run("edit.scale", &json!({"factor": 2})).is_err());
+    assert_eq!(s.undo_label(), label, "no undo step");
+    // With a shape beside it, the shape turns.
+    let r = s.run("graphics.add", &json!({"shape": "rectangle", "points": [[0, 0], [5, 5]], "layer": layer})).unwrap();
+    s.run("select.rows", &json!({"layer": layer, "rows": [t["row"], r["row"]]})).unwrap();
+    assert_eq!(s.run("edit.rotate", &json!({"angle": 34})).unwrap()["modified"], 1);
+}
+
 /// A command that opens another project part way and then fails (a plugin's command through its
 /// bridge) leaves the project before it open, counted as it was: the interface keeps what it
 /// holds for it.
