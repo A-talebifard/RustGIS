@@ -1002,6 +1002,8 @@ fn hostile_params_never_panic() {
         // MySQL addresses that can't be read, so nothing connects.
         json!({"database": "mysql://u:p#@[::1/x?ssl-mode=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
         json!({"database": "MARIADB://u@h:99999999/%zz?ssl-mode=VERIFY_CA&ssl-ca=/nonexistent", "sql": "SELECT 1"}),
+        json!({"database": "mssql://u:p#@[::1/x?encrypt=nope", "password": 7, "layer": ":", "crs": "EPSG:-1"}),
+        json!({"database": "MSSQL://u@h:99999999/%zz?ca=/nonexistent", "sql": "SELECT 1"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -7397,6 +7399,65 @@ fn mysql_live_end_to_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// SQL Server project reopening and failed commands never expose credentials or add layers.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sqlserver_layers_reopen_without_secrets() {
+    let mut s = Session::new(Project::default());
+    let mut src: rustgis_map::source::SourceLayer = serde_json::from_value(json!({
+        "sqlserver": {"database": "mssql://me@127.0.0.1:1/gis?encrypt=false", "table": "roads", "family": "Lines"}
+    }))
+    .unwrap();
+    let e = src.open().unwrap_err();
+    assert!(e.contains("connect again with Add Data › Database"), "{e}");
+    assert!(!src.is_open());
+    let saved = serde_json::to_string(&src).unwrap();
+    assert!(saved.contains("\"sqlserver\":{") && saved.contains("\"table\":\"roads\"") && !saved.contains("password"), "{saved}");
+    let before = s.map().layers.len();
+    let e = s.run("layer.addDatabase", &json!({"database": "mssql://me:s3cret@127.0.0.1:1/gis", "password": "pw"})).unwrap_err();
+    assert!(e.starts_with("gis: ") && !e.contains("s3cret") && !e.contains("pw"), "{e}");
+    let e = s.run("layer.addDatabase", &json!({"database": "mssql://h:port/gis"})).unwrap_err();
+    assert!(e.contains("port 'port'"), "{e}");
+    let e = s.run("layer.addSql", &json!({"sql": "SELECT 1", "database": "mssql://h/gis"})).unwrap_err();
+    assert!(e.contains("SQL Server"), "{e}");
+    #[cfg(not(windows))]
+    {
+        let e = s.run("info.databaseTables", &json!({"database": "mssql://127.0.0.1:1/gis"})).unwrap_err();
+        assert!(e.contains("give a SQL Server login"), "{e}");
+    }
+    assert_eq!(s.map().layers.len(), before);
+}
+
+/// `RUSTGIS_TEST_MSSQL` names a live database: add every table, stream one, draw, save and reopen.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[ignore]
+fn sqlserver_live_end_to_end() {
+    let Ok(address) = std::env::var("RUSTGIS_TEST_MSSQL") else { return };
+    let mut s = Session::new(Project::default());
+    let listed = s.run("info.databaseTables", &json!({"database": address})).unwrap();
+    let names: Vec<String> = listed["layers"].as_array().unwrap().iter().filter_map(|v| v.as_str()).map(str::to_string).collect();
+    assert!(!names.is_empty());
+    let r = s.run("layer.addDatabase", &json!({"database": address})).unwrap();
+    assert!(r["layers"].as_array().unwrap().len() >= names.len(), "{r}");
+    assert!(r["features"].as_u64().unwrap() > 0, "{r}");
+    let r = s.run("layer.addDatabase", &json!({"database": address, "layer": names[0], "stream": true, "name": "live"})).unwrap();
+    assert_eq!(r["streamed"], true);
+    let id = r["layer"].as_u64().unwrap() as u32;
+    assert!(s.map().layer(id).unwrap().source.as_ref().unwrap().sqlserver.is_some());
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-sqlserver-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    s.run("share.exportMap", &json!({"path": dir.join("map.png").display().to_string()})).unwrap();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let password = rustgis_data::source::msconn::split_password(&address).and_then(|(_, p)| p);
+    assert!(password.is_none_or(|p| !text.contains(&p)), "the project keeps no password");
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let l = t.map().layer_by_name("live").unwrap();
+    assert!(l.source.as_ref().unwrap().is_open(), "{:?}", l.source.as_ref().unwrap().error);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Deleting a map or layout other than the one in view (a tab's close button) keeps that view;
 /// deleting the one in view falls back to the first map; the last map stays.
 #[test]
@@ -8304,6 +8365,71 @@ fn text_graphics_take_italic_alignment_and_letter_spacing() {
     l.dataset.features[ra].attrs[fa] = rustgis_data::Value::Text("sideways".into());
     l.dataset.features[ra].attrs[fs] = rustgis_data::Value::Float(f64::NAN);
     assert_eq!(style(&s, ra), (false, TextAlign::Left, 0.0));
+}
+
+/// Text graphics pasted into a graphics layer made before their style fields keep their style
+/// (#583): the layer gains the fields they carry, from the session's clipboard and from GeoJSON
+/// text alike; features that aren't graphics add none, even with a field of the same name.
+#[test]
+fn pasted_graphics_keep_their_style_in_an_older_graphics_layer() {
+    use rustgis_map::graphics;
+    use rustgis_map::layout::TextAlign;
+    let mut s = world();
+    let a = s
+        .run(
+            "graphics.add",
+            &json!({"shape": "text", "points": [[10, 50]], "text": "Styled", "bold": true, "italic": true, "align": "right", "letterSpacing": 4}),
+        )
+        .unwrap();
+    let (from, row) = (a["layer"].as_u64().unwrap() as u32, a["row"].as_u64().unwrap() as usize);
+    // A graphics layer from before the style fields.
+    let old = |s: &mut Session, name: &str| {
+        let id = s.run("graphics.newLayer", &json!({"name": name})).unwrap()["layer"].as_u64().unwrap() as u32;
+        let l = s.map_mut().layer_mut(id).unwrap();
+        for f in ["bold", "italic", "align", "letter_spacing"] {
+            let fi = l.dataset.field_index(f).unwrap();
+            l.dataset.fields.remove(fi);
+            l.dataset.features.iter_mut().for_each(|ft| {
+                ft.attrs.remove(fi);
+            });
+        }
+        id
+    };
+    let style = |s: &Session, id: u32| {
+        let ds = &s.map().layer(id).unwrap().dataset;
+        let r = ds.features.len() - 1;
+        (graphics::bold(ds, r), graphics::italic(ds, r), graphics::align(ds, r), graphics::letter_spacing(ds, r))
+    };
+    s.run("select.rows", &json!({"layer": from, "rows": [row]})).unwrap();
+    let text = s.run("edit.copy", &Value::Null).unwrap()["text"].as_str().unwrap().to_string();
+    // From the session's clipboard (the Paste command) and from its GeoJSON (Ctrl+V in the app).
+    for via_text in [false, true] {
+        let to = old(&mut s, "Older");
+        let mut p = json!({"layer": to});
+        if via_text {
+            p["text"] = json!(text);
+        }
+        s.run("edit.paste", &p).unwrap();
+        assert_eq!(style(&s, to), (true, true, TextAlign::Right, 4.0), "via text: {via_text}");
+    }
+    // Features that aren't graphics add no field, though one is named as a style: with no `kind`,
+    // or with a `kind` of their own that isn't a graphic's.
+    for properties in [r#"{"align":"N"}"#, r#"{"kind":"inspection","align":"center"}"#] {
+        let to = old(&mut s, "Notes");
+        let plain = format!(
+            r#"{{"type":"FeatureCollection","features":[{{"type":"Feature","geometry":{{"type":"Point","coordinates":[1,2]}},"properties":{properties}}}]}}"#
+        );
+        s.run("edit.paste", &json!({"layer": to, "text": plain})).unwrap();
+        assert!(s.map().layer(to).unwrap().dataset.field_index("align").is_none(), "{properties}");
+    }
+    // Pasted together, a graphic with no alignment and another feature with one: the feature's
+    // value doesn't make the layer gain the field.
+    let to = old(&mut s, "Mixed");
+    let mixed = r#"{"type":"FeatureCollection","features":[
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"kind":"text","text":"A"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[3,4]},"properties":{"kind":"inspection","align":"center"}}]}"#;
+    s.run("edit.paste", &json!({"layer": to, "text": mixed})).unwrap();
+    assert!(s.map().layer(to).unwrap().dataset.field_index("align").is_none());
 }
 
 /// A text graphic is placed again by its points (dragged on the map, #516), as one undo step;

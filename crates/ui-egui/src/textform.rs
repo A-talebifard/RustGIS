@@ -7,6 +7,8 @@
 use egui::{Color32, Ui, vec2};
 use rustgis_engine::map::layout::{MAX_LETTER_SPACING, MIN_LETTER_SPACING, TextAlign};
 
+use crate::widgets::Dragged;
+
 /// What the form edits. A style is left out where the text doesn't have it.
 pub struct Fields<'a> {
     pub text: &'a mut String,
@@ -90,12 +92,13 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
     out.typing = r.has_focus() && !out.text;
     egui::Grid::new(id.with("style")).num_columns(2).min_col_width(LABEL_W).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
         ui.label(tl!("Size"));
-        let before = *f.size;
+        let saved = *f.size;
+        let drag = Dragged::lend(ui, id.with("size"), f.size);
         let r = ui.add(egui::DragValue::new(f.size).range(rustgis_engine::map::graphics::FONT_SIZE).speed(0.2).suffix(" pt"));
         // Named for assistive technology, as its label sits in the other column.
         let size = *f.size;
         r.widget_info(|| egui::WidgetInfo { label: Some(tl!("Size").to_string()), ..egui::WidgetInfo::drag_value(true, size) });
-        out.size = (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (*f.size - before).abs() > 1e-6;
+        out.size = drag.settled(ui, &r, f.size) && (*f.size - saved).abs() > 1e-6;
         ui.end_row();
         if let Some(c) = f.color {
             ui.label(tl!("Color"));
@@ -134,7 +137,8 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
         }
         if let Some(ls) = f.letter_spacing {
             ui.label(tl!("Letter spacing"));
-            let before = *ls;
+            let saved = *ls;
+            let drag = Dragged::lend(ui, id.with("letter_spacing"), ls);
             let r =
                 ui.add(egui::DragValue::new(ls).range(MIN_LETTER_SPACING..=MAX_LETTER_SPACING).speed(0.1).max_decimals(1).suffix(" pt"));
             let now = *ls;
@@ -142,7 +146,7 @@ pub fn show(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, tokens: &[&
                 label: Some(tl!("Letter spacing").to_string()),
                 ..egui::WidgetInfo::drag_value(true, now)
             });
-            out.letter_spacing = (r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged())) && (now - before).abs() > 1e-6;
+            out.letter_spacing = drag.settled(ui, &r, ls) && (*ls - saved).abs() > 1e-6;
             ui.end_row();
         }
     });
@@ -172,18 +176,20 @@ mod tests {
     fn harness(form: Form) -> egui_kittest::Harness<'static, Form> {
         egui_kittest::Harness::builder().build_ui_state(
             |ui, f: &mut Form| {
+                // The numbers are lent saved and kept only once settled, as the pane's callers do.
+                let (mut size, mut spacing) = (f.size, f.letter_spacing);
                 let s = show(
                     ui,
                     "form",
                     &[rustgis_engine::map::graphics::TOKENS, rustgis_engine::map::layout::PAGE_TOKENS],
                     Fields {
                         text: &mut f.text,
-                        size: &mut f.size,
+                        size: &mut size,
                         color: f.styled.then_some(&mut f.color),
                         bold: f.styled.then_some(&mut f.bold),
                         italic: f.styled.then_some(&mut f.italic),
                         align: f.styled.then_some(&mut f.align),
-                        letter_spacing: f.styled.then_some(&mut f.letter_spacing),
+                        letter_spacing: f.styled.then_some(&mut spacing),
                         select: false,
                     },
                 );
@@ -199,6 +205,12 @@ mod tests {
                     if on {
                         f.settled.push(what);
                     }
+                }
+                if s.size {
+                    f.size = size;
+                }
+                if s.letter_spacing {
+                    f.letter_spacing = spacing;
                 }
             },
             form,
@@ -254,5 +266,37 @@ mod tests {
         h.run();
         assert!(h.state().italic);
         assert_eq!(h.state().settled, ["italic"]);
+    }
+
+    /// A number dragged and let go keeps the dragged value, though the caller lends the saved one
+    /// each frame and egui forgets the dragged one on release (it used to end where it started).
+    #[test]
+    fn a_dragged_number_is_kept_when_let_go() {
+        let mut h = harness(Form { text: "T".into(), size: 12.0, styled: true, ..Form::default() });
+        h.run();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for (name, what) in [("Letter spacing", "letterSpacing"), ("Size", "size")] {
+            let at = h.get_by_role_and_label(Role::SpinButton, name).rect().center();
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            h.event(button(at, true));
+            h.step();
+            // Dragged right over several frames, then let go without moving.
+            for i in 1..=4 {
+                h.event(egui::Event::PointerMoved(at + vec2(10.0 * i as f32, 0.0)));
+                h.step();
+            }
+            h.event(button(at + vec2(40.0, 0.0), false));
+            h.step();
+            h.run();
+            assert_eq!(h.state().settled.iter().filter(|s| **s == what).count(), 1, "{name}: settled {:?}", h.state().settled);
+        }
+        let (spacing, size) = (h.state().letter_spacing, h.state().size);
+        assert!(spacing > 1.0 && size > 14.0, "kept: spacing {spacing}, size {size}");
     }
 }
