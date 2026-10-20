@@ -39,6 +39,9 @@ pub enum Script {
     /// Latin, Cyrillic, Greek or Georgian: covered by the interface fonts.
     Alphabetic,
     Cjk(CjkFont),
+    /// Arabic script (Persian): a face with Arabic and Latin letters, drawn ahead of the
+    /// interface font.
+    Arabic,
 }
 
 /// Which CJK face reads best for a language (the glyph shapes differ by region).
@@ -99,7 +102,7 @@ pub static LANGUAGES: [LangInfo; 17] = [
     lang!("az", "Azərbaycanca", "Azerbaijani", Script::Alphabetic, "az.tsv"),
     lang!("id", "Bahasa Indonesia", "Indonesian", Script::Alphabetic, "id.tsv"),
     lang!("vi", "Tiếng Việt", "Vietnamese", Script::Alphabetic, "vi.tsv"),
-    lang!("fa", "فارسی", "Persian (Farsi)", Script::Alphabetic, "fa.tsv"),
+    lang!("fa", "فارسی", "Persian (Farsi)", Script::Arabic, "fa.tsv"),
     lang!("zh", "简体中文", "Chinese (Simplified)", Script::Cjk(CjkFont::SimplifiedChinese), "zh.tsv"),
     lang!("ja", "日本語", "Japanese", Script::Cjk(CjkFont::Japanese), "ja.tsv"),
     lang!("ko", "한국어", "Korean", Script::Cjk(CjkFont::Korean), "ko.tsv"),

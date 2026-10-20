@@ -11,8 +11,9 @@
 //! languages start their lines with right-to-left text (see `fa.tsv`).
 //!
 //! [`visual`] rewrites a back-to-front line into the form that reads correctly
-//! once laid out: each left-to-right run is reversed ahead of time, and the
-//! brackets in the line's flow are mirrored. Joining, which the shaper does on
+//! once laid out: each left-to-right run is reversed ahead of time, and every
+//! bracket is mirrored, for the shaper mirrors every bracket of a back-to-front
+//! line, those inside a left-to-right run too. Joining, which the shaper does on
 //! the text as given, is untouched: right-to-left text keeps its written
 //! order. Each line is rewritten on its own strength, and a line that starts
 //! left-to-right, or a string with no right-to-left text at all, comes back
@@ -28,8 +29,7 @@
 //!
 //! The run rules are the Unicode bidirectional algorithm's, kept to what one
 //! line needs: a neutral joins a run when left-to-right text is on both sides
-//! of it (N1), a bracket when it opens or closes onto a Latin letter (N0), and
-//! a bracket in right-to-left flow shows its mirrored glyph (L4).
+//! of it (N1), and a bracket when it opens or closes onto a Latin letter (N0).
 
 /// A character of a script written right to left (Arabic, Persian, Hebrew). Digits
 /// read left to right, and the comma, semicolon and question mark take the line's
@@ -78,7 +78,7 @@ fn strong(c: char) -> Option<bool> {
     }
 }
 
-/// The mirrored glyph of a bracket in right-to-left flow (Unicode L4).
+/// The mirrored glyph of a bracket, which the shaper mirrors back on a back-to-front line.
 fn mirror(c: char) -> char {
     match c {
         '(' => ')',
@@ -117,8 +117,8 @@ fn back_to_front(s: &str) -> bool {
 }
 
 /// `s` in the form that reads correctly when laid out back to front: each
-/// left-to-right run reversed (the line's own reversal puts it back), brackets in
-/// the line's flow mirrored. Everything else is untouched, so the shaper still
+/// left-to-right run reversed (the line's own reversal puts it back), and every bracket
+/// mirrored (the shaper mirrors them all back). Everything else is untouched, so the shaper still
 /// joins the right-to-left text as written. Every line is rewritten on its own
 /// strength; a line that starts left-to-right, and a string with no right-to-left
 /// text, come back unchanged.
@@ -207,11 +207,11 @@ fn visual_line(line: &str) -> String {
         if in_run(i) {
             run.push(*c);
         } else {
-            out.extend(run.drain(..).rev());
+            out.extend(run.drain(..).rev().map(mirror));
             out.push(mirror(*c));
         }
     }
-    out.extend(run.drain(..).rev());
+    out.extend(run.drain(..).rev().map(mirror));
     out
 }
 
@@ -303,9 +303,11 @@ mod tests {
 
     #[test]
     fn brackets_pair_onto_letters_and_mirror_in_flow() {
-        // Brackets that close onto Latin letters join the run as a unit…
-        assert_eq!(visual("مجوز (CC BY 4.0) است"), "مجوز )0.4 YB CC( است");
-        assert_eq!(visual("قالب {z}/{x}/{y} است"), "قالب }y{/}x{/}z{ است");
+        // Brackets that close onto Latin letters join the run as a unit, and mirror
+        // as well: the shaper mirrors every bracket of the line, the run's too.
+        assert_eq!(visual("مجوز (CC BY 4.0) است"), "مجوز (0.4 YB CC) است");
+        assert_eq!(visual("قالب {z}/{x}/{y} است"), "قالب {y}/{x}/{z} است");
+        assert_eq!(visual("مرکاتور وب (WGS 84)"), "مرکاتور وب (48 SGW)");
         // …and those around right-to-left text mirror in its flow.
         assert_eq!(visual("پنل (نماد) است"), "پنل )نماد( است");
     }
