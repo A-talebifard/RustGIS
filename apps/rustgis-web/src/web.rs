@@ -58,8 +58,38 @@ const DATA_EXTS: &[&str] = &[
 const CANVAS_ID: &str = "rustgis_canvas";
 const LOADING_ID: &str = "rustgis_loading";
 
+/// The console logger, without the drawing library's warnings. tiny-skia warns of every path
+/// it can't fill, stroke or dash (a vector tile's shapes shrunk to nothing, dashes past its
+/// limits): thousands a frame on a vector tile map, each written to the console with a stack
+/// trace, which made the map crawl and the page run out of memory.
+struct Logger(eframe::WebLogger);
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        worth_logging(metadata) && self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if worth_logging(record.metadata()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+/// Whether a message is worth the console: of tiny-skia's, only errors.
+fn worth_logging(metadata: &log::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    let tiny_skia = target == "tiny_skia" || target.starts_with("tiny_skia::");
+    !tiny_skia || metadata.level() <= log::Level::Error
+}
+
 pub fn start() {
-    eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    log::set_max_level(log::LevelFilter::Info);
+    log::set_boxed_logger(Box::new(Logger(eframe::WebLogger::new(log::LevelFilter::Info)))).ok();
     wasm_bindgen_futures::spawn_local(async {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             log::error!("no document");
@@ -429,6 +459,50 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
 }
 
+/// Decodes a PNG, JPEG or WebP picture with the browser's decoder (`createImageBitmap`, off the
+/// page's thread) into the tile cache's RAW pixels: decoded in WebAssembly instead, a map's
+/// arriving tiles held up its frames for tens of milliseconds each.
+async fn decode_picture(bytes: &[u8]) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+    use rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::RAW;
+    let window = web_sys::window().ok_or("no window")?;
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+    // No premultiplying or colour conversion on the way in (the canvas premultiplies, so pixels
+    // nearly transparent come back a little rounded: no matter for a map tile).
+    let options = web_sys::ImageBitmapOptions::new();
+    options.set_premultiply_alpha(web_sys::PremultiplyAlpha::None);
+    options.set_color_space_conversion(web_sys::ColorSpaceConversion::None);
+    let bitmap: web_sys::ImageBitmap =
+        wasm_bindgen_futures::JsFuture::from(window.create_image_bitmap_with_blob_and_image_bitmap_options(&blob, &options)?)
+            .await?
+            .dyn_into()?;
+    let (w, h) = (bitmap.width(), bitmap.height());
+    let pixels = read_bitmap(&bitmap, w, h);
+    // Closed whatever happened: its memory goes now, not when the garbage collector finds it.
+    bitmap.close();
+    let pixels = pixels?;
+    let mut raw = Vec::with_capacity(RAW.len() + 8 + pixels.len());
+    raw.extend_from_slice(RAW);
+    raw.extend_from_slice(&w.to_le_bytes());
+    raw.extend_from_slice(&h.to_le_bytes());
+    raw.extend_from_slice(&pixels);
+    Ok(raw)
+}
+
+/// The straight RGBA pixels of a `w × h` bitmap, drawn into a canvas read back on the CPU.
+fn read_bitmap(bitmap: &web_sys::ImageBitmap, w: u32, h: u32) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return Err("a picture of the wrong size".into());
+    }
+    let canvas = web_sys::OffscreenCanvas::new(w, h)?;
+    let attributes = js_sys::Object::new();
+    js_sys::Reflect::set(&attributes, &"willReadFrequently".into(), &true.into())?;
+    let ctx: web_sys::OffscreenCanvasRenderingContext2d =
+        canvas.get_context_with_context_options("2d", &attributes)?.ok_or("no 2D canvas")?.dyn_into()?;
+    ctx.draw_image_with_image_bitmap(bitmap, 0.0, 0.0)?;
+    Ok(ctx.get_image_data(0.0, 0.0, f64::from(w), f64::from(h))?.data().0)
+}
+
 /// How long a tile or document fetch may go without anything coming in: the answer's headers,
 /// or the next part of its body. A slow but steady answer is never cut off; one that stalls is
 /// given up, so it doesn't stay under way forever, holding its server's place in the queue.
@@ -676,6 +750,19 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
     // Map tiles come through the browser's fetch (the app repaints when they arrive).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_fetcher(|url, done| {
         wasm_bindgen_futures::spawn_local(async move { done(fetch_bytes(&url).await) });
+    });
+    // Their pictures are decoded by the browser, off the page's thread.
+    rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_image_decoder(|bytes, done| {
+        wasm_bindgen_futures::spawn_local(async move {
+            match decode_picture(&bytes).await {
+                Ok(raw) => done(Ok(raw)),
+                // The browser can't: decoded in WebAssembly instead.
+                Err(e) => {
+                    log::debug!("the browser didn't decode a picture: {e:?}");
+                    done(Err(bytes))
+                }
+            }
+        });
     });
     // So are JSON documents POSTed (the NLDI's flowtrace).
     rustgis_ui_egui::rustgis_engine::render::rustgis_tiles::cache::set_poster(|url, body, done| {
