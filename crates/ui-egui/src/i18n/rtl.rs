@@ -47,10 +47,11 @@ fn rtl_script(c: char) -> bool {
         | 0xFE70..=0xFEFF)
 }
 
-/// A character of a left-to-right run: a Latin letter or digit, a Persian or
-/// Arabic digit, or a superscript number (squared, cubed — European numbers).
+/// A character of a left-to-right run: a letter or number of any script but a
+/// right-to-left one (Latin, Cyrillic, Greek, CJK, accented letters, superscripts),
+/// or a Persian or Arabic digit.
 fn ltr(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c as u32, 0x06F0..=0x06F9 | 0x0660..=0x0669) || matches!(c, '²' | '¹' | '³')
+    c.is_alphanumeric() && !rtl_script(c)
 }
 
 /// A digit of either script: what the degree sign attaches to.
@@ -58,9 +59,10 @@ fn digit(c: char) -> bool {
     c.is_ascii_digit() || matches!(c as u32, 0x0660..=0x0669 | 0x06F0..=0x06F9)
 }
 
-/// A Latin letter: what brackets pair onto (they close around letters, not numbers).
+/// A left-to-right letter: what brackets pair onto (they close around letters, not
+/// numbers).
 fn letter(c: char) -> bool {
-    c.is_ascii_alphabetic()
+    c.is_alphabetic() && !rtl_script(c)
 }
 
 /// What the toolkit's direction guess makes of a character: `Some(true)` — of a
@@ -180,6 +182,26 @@ fn visual_line(line: &str) -> String {
             word_next = 2;
         }
     }
+    // Paired brackets are resolved as one (Unicode BD16, N0): a pair joins the run
+    // only when both of its brackets would, and nothing right-to-left is inside, so
+    // its two brackets never land in different runs.
+    let mut partner: Vec<Option<usize>> = vec![None; chars.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        if opening(*c) {
+            open.push(i);
+        } else if closing(*c)
+            && let Some(at) = open.iter().rposition(|o| chars.get(*o).copied().map(mirror) == Some(*c))
+        {
+            let o = open[at];
+            open.truncate(at);
+            partner[o] = Some(i);
+            partner[i] = Some(o);
+        }
+    }
+    let alone = |i: usize| {
+        if opening(chars[i]) { letter_after[i] == 1 } else { letter_before[i] == 1 }
+    };
     let in_run = |i: usize| {
         let c = chars[i];
         if ltr(c) {
@@ -193,10 +215,14 @@ fn visual_line(line: &str) -> String {
             // the line's flow otherwise.
             return (0 < i && digit(chars[i - 1])) || (i + 1 < chars.len() && digit(chars[i + 1]));
         }
-        if opening(c) {
-            letter_after[i] == 1
-        } else if closing(c) {
-            letter_before[i] == 1
+        if opening(c) || closing(c) {
+            match partner[i] {
+                Some(j) => {
+                    let (o, e) = (i.min(j), i.max(j));
+                    alone(o) && alone(e) && !chars[o..e].iter().copied().any(rtl_script)
+                }
+                None => alone(i),
+            }
         } else {
             before[i] == 1 && after[i] == 1
         }
@@ -299,6 +325,9 @@ mod tests {
         assert_eq!(visual("باکت‌های S3"), "باکت‌های 3S");
         assert_eq!(visual("نسخه 2.0 است"), "نسخه 0.2 است");
         assert_eq!(visual("دو S3 Bucket است"), "دو tekcuB 3S است");
+        // Letters of other left-to-right scripts, and accented ones, are runs too.
+        assert_eq!(visual("افزوده شد: Москва"), "افزوده شد: авксоМ");
+        assert_eq!(visual("افزوده شد: Café"), "افزوده شد: éfaC");
     }
 
     #[test]
@@ -308,6 +337,9 @@ mod tests {
         assert_eq!(visual("مجوز (CC BY 4.0) است"), "مجوز (0.4 YB CC) است");
         assert_eq!(visual("قالب {z}/{x}/{y} است"), "قالب {y}/{x}/{z} است");
         assert_eq!(visual("مرکاتور وب (WGS 84)"), "مرکاتور وب (48 SGW)");
+        // A pair is resolved as one: with right-to-left text inside, both brackets
+        // stay in the line's flow, and the Latin words inside are runs of their own.
+        assert_eq!(visual("پنل (Symbology و GPU) است"), "پنل )ygolobmyS و UPG( است");
         // …and those around right-to-left text mirror in its flow.
         assert_eq!(visual("پنل (نماد) است"), "پنل )نماد( است");
     }
