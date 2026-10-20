@@ -2092,6 +2092,8 @@ impl RustGisApp {
                             "topojson",
                             "dxf",
                             "dwg",
+                            // A File Geodatabase is a folder: any of its tables adds it.
+                            "gdbtable",
                             "tab",
                             "mif",
                             "osm",

@@ -2001,7 +2001,11 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
     };
     let mut entries: Vec<(bool, String, std::path::PathBuf)> = rd
         .filter_map(|e| e.ok())
-        .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().to_string(), e.path()))
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            // A File Geodatabase's folder is data, listed and added like a file.
+            (e.path().is_dir() && !rustgis_engine::data::source::is_gdb_name(&name), name, e.path())
+        })
         .filter(|(d, n, _)| {
             !n.starts_with('.')
                 && (*d
@@ -2014,6 +2018,8 @@ fn folder_browser(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                         "tif",
                         "tiff",
                         "asc",
+                        // A File Geodatabase's folder, listed as data above.
+                        "gdb",
                         "rgis",
                         "rgisx",
                         "rgispkg",
