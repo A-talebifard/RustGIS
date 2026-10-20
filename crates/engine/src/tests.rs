@@ -6121,6 +6121,175 @@ fn serve_gated(
     (format!("http://{addr}"), sent)
 }
 
+/// A STAC collection's band as a data cube on the time slider (#559), from a local API: a tile
+/// layer per grid tile, each a file per date; the slider on over their dates; a fixed range in the
+/// band's own units, through its scale; a tile with no date in the window drawn as nothing.
+#[test]
+fn a_stac_data_cube_on_the_time_slider() {
+    let (cog, _) = serve_ranges(rustgis_data::raster::cog::example(512, 256));
+    let item = |id: &str, tile: &str, date: &str, band: bool| {
+        let asset = if band {
+            format!(
+                r#""NDVI": {{"href": "{cog}/{id}.tif", "type": "image/tiff; application=geotiff; profile=cloud-optimized", "eo:bands": [{{"scale": 0.0001}}]}}"#
+            )
+        } else {
+            format!(r#""EVI": {{"href": "{cog}/{id}.tif"}}"#)
+        };
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["{tile}"]}}, "assets": {{{asset}}}}}"#
+        )
+    };
+    let features = [
+        item("a1", "T1", "2024-01-01", true),
+        item("a2", "T1", "2024-01-17", true),
+        item("b1", "T2", "2024-01-01", true),
+        item("b2", "T2", "2024-01-01", true),
+        item("c1", "T3", "2024-01-17", false),
+    ]
+    .join(",");
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{features}]}}"#))], 4);
+    let api = format!("{base}/v1");
+    let mut s = Session::new(Project::default());
+    let r = s
+        .run(
+            "stac.addCube",
+            &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31", "range": [0, 0.9]}),
+        )
+        .unwrap();
+    assert_eq!(
+        (r["items"].as_u64(), r["tiles"].as_u64(), r["dates"].as_u64(), r["layers"].as_u64(), r["skipped"].as_u64()),
+        (Some(5), Some(2), Some(2), Some(2), Some(1)),
+        "{r}"
+    );
+    assert_eq!(r["duplicates"], 1, "the second item of T2 on 2024-01-01 is left out and counted");
+    assert!(crate::cmd::tiles::NETWORK.contains(&"stac.addCube"), "a network command: a plugin needs the network permission to run it");
+    // An end given as a year or a month takes all of it: "end": "2024-01" reaches 31 January.
+    // Read as 1 January, it would be before this start and refused.
+    let mut by_month = Session::new(Project::default());
+    let r2 = by_month
+        .run(
+            "stac.addCube",
+            &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-15", "end": "2024-01"}),
+        )
+        .unwrap();
+    assert_eq!(r2["dates"], 2, "an end given as a year or a month reaches its last day: {r2}");
+    // A slider already on takes the cube's dates in: one over other dates gains these two.
+    let mut busy = Session::new(Project::default());
+    busy.run("time.set", &json!({"dates": ["2023-06-01", "2023-07-01"]})).unwrap();
+    busy.run(
+        "stac.addCube",
+        &json!({"url": api, "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+    )
+    .unwrap();
+    assert_eq!(busy.run("time.info", &Value::Null).unwrap()["steps"], 4, "the slider takes the cube's dates in");
+    let tiles = s.map().tiles.clone();
+    assert_eq!(tiles.len(), 2);
+    let t1 = tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();
+    let t2 = tiles.iter().find(|t| t.name.ends_with("T2")).unwrap();
+    // A file per date (the first item of a tile and day), the range in stored values (0.9 / 0.0001).
+    assert_eq!(t1.time_urls.len(), 2);
+    assert_eq!(t2.time_urls.len(), 1);
+    assert!(t1.time_urls.iter().all(|(_, u)| u.ends_with("#range=0,9000")), "{:?}", t1.time_urls);
+    assert!(t2.time_urls[0].1.contains("/b1.tif"));
+    // The slider: on, over the two dates; at the first, both tiles draw.
+    assert_eq!(s.run("time.info", &Value::Null).unwrap()["steps"], 2);
+    assert!(t1.draws() && t2.draws() && t1.url.contains("/a1.tif"));
+    // The second date: T1's second file; T2 has none then and draws nothing.
+    s.run("time.goTo", &json!({"step": 1})).unwrap();
+    let t1 = s.map().tiles.iter().find(|t| t.name.ends_with("T1")).unwrap();
+    let t2 = s.map().tiles.iter().find(|t| t.name.ends_with("T2")).unwrap();
+    assert!(t1.url.contains("/a2.tif") && t1.draws(), "{}", t1.url);
+    assert!(!t2.draws());
+    // Saved and opened again, each tile's dates and the slider's step come back.
+    let text = serde_json::to_string(&s.project).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text})).unwrap();
+    let again = t.map().tiles.iter().find(|x| x.name.ends_with("T1")).unwrap();
+    assert_eq!(again.time_urls.len(), 2);
+    assert!(again.url.contains("/a2.tif"), "{}", again.url);
+    // T2, with no file at that step, draws nothing from the start: opening takes the window.
+    assert!(!t.map().tiles.iter().find(|x| x.name.ends_with("T2")).unwrap().draws());
+    for bad in [
+        json!({"url": api, "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "start": "2024-01-01", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-02-01", "end": "2024-01-01"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [1, 0]}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "June", "end": "2024-01-31"}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": ["a", 0, 1]}),
+        json!({"url": api, "collection": "cube", "asset": "ndvi", "start": "2024-01-01", "end": "2024-01-31", "range": [0, "x", 1]}),
+    ] {
+        assert!(s.run("stac.addCube", &bad).is_err(), "{bad}");
+    }
+    // A file read whole (a GeoTIFF that isn't cloud-optimised) can't follow the slider: the cube
+    // is refused, and what it added is taken back, the view its first tile framed included.
+    let gt = rustgis_data::raster::GeoTransform { origin_x: 10.0, origin_y: 46.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let plain = rustgis_data::raster::Raster::new(
+        "p",
+        2,
+        2,
+        vec![vec![1.0; 4]],
+        gt,
+        rustgis_data::raster::Crs::LonLat,
+        None,
+        rustgis_data::raster::ColorHint::Gray,
+        "Float32",
+    )
+    .unwrap();
+    let (file, _) = serve_ranges(rustgis_data::raster::geotiff::write(&plain, 0).unwrap());
+    let one = format!(
+        r#"{{"type": "Feature", "id": "p1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+           "properties": {{"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["P"]}}, "assets": {{"NDVI": {{"href": "{file}/p.tif"}}}}}}"#
+    );
+    let first = item("q1", "A", "2024-01-01", true);
+    let plain_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{first},{one}]}}"#))], 2);
+    s.zoom_to(&rustgis_geom::Extent::new(-60.0, -30.0, -50.0, -20.0));
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let (camera, time) = (s.map().camera, s.map().time.clone());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{plain_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("not a cloud-optimised"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
+    // The view tile A framed and the slider are put back too.
+    assert_eq!(s.map().camera, camera);
+    assert_eq!(s.map().time, time);
+    // Files stored at another scale partway: one range can't fit them all, so it's refused.
+    let rescaled = |id: &str, date: &str, scale: f64| {
+        format!(
+            r#"{{"type": "Feature", "id": "{id}", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+               "properties": {{"datetime": "{date}T00:00:00Z", "bdc:tiles": ["T1"]}},
+               "assets": {{"NDVI": {{"href": "{cog}/{id}.tif", "type": "image/tiff; profile=cloud-optimized", "eo:bands": [{{"scale": {scale}}}]}}}}}}"#
+        )
+    };
+    let two = [rescaled("r1", "2024-01-01", 0.0001), rescaled("r2", "2024-01-17", 0.001)].join(",");
+    let rescaled_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{two}]}}"#))], 2);
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{rescaled_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31", "range": [0, 0.9]}),
+        )
+        .unwrap_err();
+    assert!(e.contains("same scale and offset"), "{e}");
+    // Files behind signed addresses (Planetary Computer's) are refused before anything is added.
+    let signed = r#"{"type": "Feature", "id": "pc1", "collection": "cube", "bbox": [10, 45, 11, 46], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z", "bdc:tiles": ["S"]},
+        "assets": {"NDVI": {"href": "https://sentinel2l2a01.blob.core.windows.net/sentinel2-l2/a.tif"}}}"#;
+    let signed_api = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{signed}]}}"#))], 2);
+    let (tiles, layers) = (s.map().tiles.len(), s.map().layers.len());
+    let e = s
+        .run(
+            "stac.addCube",
+            &json!({"url": format!("{signed_api}/v1"), "collection": "cube", "asset": "ndvi", "bbox": [10, 45, 11, 46], "start": "2024-01-01", "end": "2024-01-31"}),
+        )
+        .unwrap_err();
+    assert!(e.contains("signed addresses"), "{e}");
+    assert_eq!((s.map().tiles.len(), s.map().layers.len()), (tiles, layers));
+}
+
 /// A cloud-optimised GeoTIFF by its address is read in place: its header, then only the tiles a
 /// map tile needs, by range; a GeoTIFF in strips is downloaded whole as a raster layer.
 #[test]
