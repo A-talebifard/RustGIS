@@ -1451,7 +1451,7 @@ impl RustGisApp {
         if id == "layer.addDownload" {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: the downloaded data is kept for this session only, so a task couldn't add it again.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1461,7 +1461,7 @@ impl RustGisApp {
         if rustgis_engine::sources::holds_secret(params) {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: its parameters may hold a password, key or token (one is named like it, an address carries one, or they nest too deep to check), and a task would keep it.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1471,7 +1471,7 @@ impl RustGisApp {
         if serde_json::to_vec(params).map_or(0, |b| b.len()) > MAX_STEP_BYTES {
             let text = crate::i18n::fmt(
                 "{command} isn't recorded: its parameters are over 4 MB, too much for a task to keep. Add that data to the project before recording.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
             return;
@@ -1482,7 +1482,7 @@ impl RustGisApp {
             self.ws.recording_key_said = true;
             let text = crate::i18n::fmt(
                 "{command}'s step keeps its key parameter. If that is an access key, delete the step (Edit Steps) before sharing the task.",
-                &[("command", tl!(spec.label))],
+                &[("command", tl_raw!(spec.label))],
             );
             self.session.notify(text, false);
         }
