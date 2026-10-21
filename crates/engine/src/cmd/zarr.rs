@@ -21,6 +21,9 @@ pub fn commands() -> Vec<C> {
         C::new("raster.zarrInfo", "Zarr Variables", "Home › Add › Add Data › Zarr", info)
             .view()
             .params(r#"{"path": "a Zarr store's folder" | "url": "https://… a store with consolidated metadata"}"#),
+        C::new("zarr.series", "Time Series at a Point", "View › Time Series", series).view().params(
+            r#"{"lon", "lat", "layer"? (a Zarr layer: its store, variable and steps; default the active layer) | "path": folder | "url": "https://…", "variable"?, "index"?: {"level": 0} (the other dimensions' steps), "start"?, "end"?: dates (default: the layer's period, else the whole axis), "crs"?: for a projected store that doesn't say} → dates, values (null for no data) and labels along the variable's time dimension at the cell holding the point (desktop)"#,
+        ),
         C::new("layer.addZarr", "Add Zarr Variable", "Home › Add › Add Data", add).params(
             r#"{"path": folder | "url": "https://…", "variable"?: "its path in the store (default: the first)", "index"?: {"time": 3, "level": 0} (other dimensions' steps, default 0), "crs"?: "EPSG:… for a store that doesn't say", "name"?: text, "time"?: bool (follow the time slider: the layer shows the step the slider is at, and turns the slider on over the variable's dates when it is off; desktop), "start"?, "end"?: dates (with time: the period to take, for an axis longer than the slider's 20,000 steps), "ran"?: (internal: a slice the app has read)}"#,
         ),
@@ -81,6 +84,9 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
     use std::sync::Mutex;
     let out = Mutex::new(HashMap::new());
     let forbidden = std::sync::atomic::AtomicUsize::new(0);
+    // All the files fetched together, within what a folder's read takes, so many chunks each
+    // within the download limit can't fill the memory.
+    let total = std::sync::atomic::AtomicU64::new(0);
     let failure: Mutex<Option<String>> = Mutex::new(None);
     let next = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -94,6 +100,13 @@ fn fetch(root: &str, keys: &[String]) -> Result<(HashMap<String, Vec<u8>>, usize
                     }
                     match crate::render::rustgis_tiles::cache::download_blocking(&format!("{root}/{k}")) {
                         Ok(b) => {
+                            let len = b.len() as u64;
+                            if total.fetch_add(len, std::sync::atomic::Ordering::Relaxed).saturating_add(len) > zarr::MAX_READ {
+                                if let Ok(mut f) = failure.lock() {
+                                    f.get_or_insert(format!("{root}: more than {} GB to read: take a smaller part", zarr::MAX_READ >> 30));
+                                }
+                                break;
+                            }
                             if let Ok(mut o) = out.lock() {
                                 o.insert(k.clone(), b);
                             }
@@ -237,6 +250,9 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
             let tif = raster::geotiff::write(&r, 0).map_err(|e| e.to_string())?;
             let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&u)), tif);
             layer.subdataset = Some(sel.label());
+            // The coordinate system given for a store that doesn't say, kept as a folder's slice
+            // keeps it, so a time series read from the layer finds it.
+            layer.crs = crs.map(str::to_string);
             super::raster::add_raster(s, &name, layer)
         }
     }
@@ -548,8 +564,19 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         };
         let (start, end) = (date("start")?, date("end")?);
         let inside = |d: &f64| start.is_none_or(|a| *d >= a) && end.is_none_or(|z| *d <= z);
-        let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
-        let picked: Vec<f64> = dates[first..].iter().copied().take_while(inside).collect();
+        let (cut, dates_len) = (start.is_none() && end.is_none() && dates.len() > rustgis_map::raster::MAX_ZARR_STEPS, dates.len());
+        let (first, picked): (usize, Vec<f64>) = if cut {
+            // An axis longer than the slider takes, with no period given (the Zarr dialog gives
+            // none): from the step picked on it, as many steps as the slider takes.
+            let at = sel.index.iter().find(|(d, _)| *d == dim).map_or(0, |(_, i)| usize::try_from(*i).unwrap_or(usize::MAX));
+            if at >= dates.len() {
+                return Err(format!("the step picked on {dim} is past its {} steps", dates.len()));
+            }
+            (at, dates[at..].iter().copied().take(rustgis_map::raster::MAX_ZARR_STEPS).collect())
+        } else {
+            let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
+            (first, dates[first..].iter().copied().take_while(inside).collect())
+        };
         if picked.len() > rustgis_map::raster::MAX_ZARR_STEPS {
             return Err(format!(
                 "{} has {} steps there; the time slider takes {} at most: give start and end",
@@ -603,7 +630,202 @@ fn add_following(s: &mut Session, p: &Value) -> CmdResult {
         let name = ps(p, "name")
             .map(str::to_string)
             .unwrap_or_else(|| layer_name(&root, &zarr::Selection { variable: zt.variable.clone(), index: zt.index.clone() }, &[]));
+        // A long axis taken in part (no period given): said, with the period taken.
+        let part = cut.then(|| {
+            let day = |d: Option<&f64>| d.map_or_else(String::new, |d| rustgis_data::time::format(*d, "YYYY-MM-DD HH:mm"));
+            format!(
+                "{} has {dates_len} steps: the layer takes {} of them, {} to {}; give start and end for another period",
+                zt.variable,
+                zt.dates.len(),
+                day(zt.dates.first()),
+                day(zt.dates.last())
+            )
+        });
         layer.time_zarr = Some(zt);
-        super::raster::add_raster(s, &name, layer)
+        let mut out = super::raster::add_raster(s, &name, layer)?;
+        if let Some(w) = part {
+            s.notify(w.clone(), false);
+            out["warning"] = serde_json::json!(w);
+        }
+        Ok(out)
+    }
+}
+
+// --- A point's time series (opengeos/RustGIS#555) -------------------------------------------------
+
+/// The store a series reads, and what of it: from a Zarr layer (one that follows the time slider,
+/// or a slice: its store, variable and steps), or from the parameters.
+#[cfg(not(target_arch = "wasm32"))]
+struct SeriesSource {
+    root: String,
+    sel: zarr::Selection,
+    /// A layer's period of the axis (a following layer's offset and dates), else the whole axis.
+    period: Option<(u64, usize)>,
+    crs: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn series_source(s: &Session, p: &Value) -> Result<SeriesSource, String> {
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    if !given("path") && !given("url") {
+        let id = s.layer_id(p)?;
+        let l = s.map().layer(id).ok_or("no such layer")?;
+        let rl = l.raster.as_ref().ok_or_else(|| format!("{} isn't a Zarr layer", l.name))?;
+        if let Some(zt) = &rl.time_zarr {
+            return Ok(SeriesSource {
+                root: zt.store.clone(),
+                sel: zarr::Selection { variable: zt.variable.clone(), index: zt.index.clone() },
+                period: Some((zt.offset, zt.dates.len())),
+                crs: zt.crs.clone(),
+            });
+        }
+        // A slice: its store is its folder, or the address it was read from.
+        let label = rl.subdataset.clone().ok_or_else(|| format!("{} isn't a Zarr layer", l.name))?;
+        let root = rl
+            .path
+            .clone()
+            .or_else(|| rl.data.as_ref().and_then(|d| d.source.clone()))
+            .ok_or_else(|| format!("{}: its store isn't known", l.name))?;
+        return Ok(SeriesSource { root, sel: zarr::Selection::parse(&label), period: None, crs: rl.crs.clone() });
+    }
+    let root = match source(p)? {
+        Source::Dir(d) | Source::Url(d) => d,
+    };
+    let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
+    Ok(SeriesSource { root, sel: selection(p), period: None, crs })
+}
+
+/// A store's metadata, and its files `keys`: a folder's read (files only, bounded), a web
+/// store's fetched.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_files(root: &str, keys: &[String]) -> Result<HashMap<String, Vec<u8>>, String> {
+    if is_web(root) {
+        // In batches, within the same total a folder's read takes: a store chunked a map a step
+        // (one chunk per step) can't fill the memory.
+        let mut out = HashMap::new();
+        let mut total = 0u64;
+        for batch in keys.chunks(64) {
+            let (got, forbidden) = fetch(root, batch)?;
+            // A file refused (HTTP 403) isn't one never written: said, not read as missing.
+            if forbidden > 0 {
+                return Err(format!("{root}: access denied (HTTP 403) to {forbidden} of its files"));
+            }
+            for (k, b) in got {
+                total = total.saturating_add(b.len() as u64);
+                if total > zarr::MAX_READ {
+                    return Err(format!("{root}: the series is too large to read: take a shorter period"));
+                }
+                out.insert(k, b);
+            }
+        }
+        return Ok(out);
+    }
+    let mut out = HashMap::new();
+    let mut total = 0u64;
+    for k in keys {
+        let path = Path::new(root).join(k);
+        // A file that isn't there is a chunk never written (Zarr's fill value); one that is but
+        // can't be taken is said, so a value isn't silently missing.
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if !meta.is_file() || meta.len() > zarr::MAX_CHUNK_FILE {
+            return Err(format!("{root}: {k} isn't a chunk file that can be read (too large, or not a file)"));
+        }
+        total = total.saturating_add(meta.len());
+        if total > zarr::MAX_READ {
+            return Err(format!("{root}: the series is too large to read"));
+        }
+        let b = std::fs::read(&path).map_err(|e| format!("{root}: {k}: {e}"))?;
+        out.insert(k.clone(), b);
+    }
+    Ok(out)
+}
+
+/// `zarr.series`: a variable's values along its time dimension at the cell holding a point,
+/// reading only the chunks that hold that cell.
+fn series(s: &mut Session, p: &Value) -> CmdResult {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (s, p);
+        Err("in the web app, a Zarr time series can't be read yet".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let num = |k: &str| super::f(p, k).ok_or_else(|| format!("{k} is required (degrees)"));
+        let (lon, lat) = (num("lon")?, num("lat")?);
+        if !lon.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return Err("lon is a longitude and lat a latitude from -90 to 90 (degrees)".into());
+        }
+        let mut src = series_source(s, p)?;
+        let store = if is_web(&src.root) {
+            cached_store(&src.root)?
+        } else {
+            std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
+        };
+        pick_variable(&store, &mut src.sel)?;
+        let var = src.sel.variable.clone();
+        let mut keys = zarr::coordinate_keys(&store, &var);
+        keys.extend(zarr::map_coordinate_keys(&store, &var));
+        let coords = store_files(&src.root, &keys)?;
+        let (dim, dates) = zarr::time_axis(&store, &var, &coords)
+            .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+        // A period is found along the axis in order, as following the slider takes it.
+        if !dates.iter().all(|d| d.is_finite()) || !dates.windows(2).all(|w| w[0] < w[1]) {
+            return Err(format!("{var}'s time axis isn't in increasing order without repeats, so its series can't be read by date"));
+        }
+        // The period: the one asked for, else the layer's, else the whole axis.
+        let date = |k: &str| -> Result<Option<f64>, String> {
+            match p.get(k).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => rustgis_data::time::parse_input(v)
+                    .map(Some)
+                    .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
+            }
+        };
+        let (start, end) = (date("start")?, date("end")?);
+        let (from, count) = if start.is_some() || end.is_some() {
+            let inside = |d: &f64| start.is_none_or(|a| *d >= a) && end.is_none_or(|z| *d <= z);
+            let first = dates.iter().position(inside).ok_or("no step of the variable falls between start and end")?;
+            (first, dates[first..].iter().take_while(|d| inside(d)).count())
+        } else {
+            match src.period {
+                Some((o, n)) => (usize::try_from(o).unwrap_or(usize::MAX).min(dates.len()), n),
+                None => (0, dates.len()),
+            }
+        };
+        let count = count.min(dates.len().saturating_sub(from));
+        if count == 0 {
+            return Err("no step to read".into());
+        }
+        // The point in the grid's coordinates.
+        let (x, y) = if zarr::is_lonlat_grid(&store, &var) {
+            (lon, lat)
+        } else {
+            let crs = match zarr::grid_crs(&store, &var) {
+                Some(c) => c,
+                None => {
+                    let given =
+                        src.crs.as_deref().ok_or("the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)")?;
+                    Crs::parse(given)?
+                }
+            };
+            let m = crs
+                .transformer()?
+                .from_lonlat(rustgis_geom::Coord::new(lon, lat))
+                .ok_or("the point can't be placed in the store's coordinate system")?;
+            (m.x, m.y)
+        };
+        let (row, col) =
+            zarr::locate(&store, &var, &coords, x, y).map_err(|e| e.to_string())?.ok_or("the point is outside the variable's grid")?;
+        let plan = zarr::plan_series(&store, &src.sel, &dim, from as u64, count as u64, row, col).map_err(|e| e.to_string())?;
+        let chunks = store_files(&src.root, &plan.keys)?;
+        let values = zarr::assemble_series(&store, &plan, &chunks).map_err(|e| e.to_string())?;
+        let picked = &dates[from..from + count];
+        let labels: Vec<String> = picked.iter().map(|d| rustgis_data::time::format(*d, "YYYY-MM-DD HH:mm")).collect();
+        let values: Vec<Value> = values.iter().map(|v| if v.is_finite() { serde_json::json!(v) } else { Value::Null }).collect();
+        let units = store.array(&var).and_then(|a| a.attrs.get("units")).and_then(Value::as_str).map(str::to_string);
+        Ok(serde_json::json!({
+            "variable": var, "units": units, "dimension": dim, "lon": lon, "lat": lat, "row": row, "col": col,
+            "dates": picked, "labels": labels, "values": values,
+        }))
     }
 }

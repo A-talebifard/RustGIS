@@ -42,6 +42,11 @@ pub fn show(app: &mut RustGisApp, ui: &mut Ui) {
             ui.advance_cursor_after_rect(rect);
         });
     }
+    // A point picked for the Time Series pane is taken only while that pane shows: with it
+    // closed or another in view, the pick ends rather than waiting with a stale click.
+    if app.ui.right != Some(RightPane::TimeSeries) && app.workflow.pick.as_ref().is_some_and(|p| p.purpose == "ts_point") {
+        app.workflow.pick = None;
+    }
     // The pane in view always has its tab, however it was set.
     if let Some(right) = app.ui.right
         && !app.ui.right_open.contains(&right)
@@ -100,6 +105,7 @@ fn right_title(pane: RightPane) -> (&'static str, &'static str) {
         RightPane::Tasks => ("Tasks", "ui.pane.tasks"),
         RightPane::Jobs => ("Workflow Manager", "ui.pane.jobs"),
         RightPane::Profile => ("Profile", "ui.pane.profile"),
+        RightPane::TimeSeries => ("Time Series", "ui.pane.timeSeries"),
         RightPane::Diagnostics => ("Diagnostic Monitor", "ui.pane.diagnostics"),
         RightPane::Infographics => ("Infographics", "ui.pane.infographics"),
         RightPane::Report => ("Report", "ui.pane.report"),
@@ -157,6 +163,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Tasks => crate::workspacepanes::tasks(app, ui, t),
             RightPane::Jobs => crate::workspacepanes::jobs(app, ui, t),
             RightPane::Profile => crate::workspacepanes::profile(app, ui, t),
+            RightPane::TimeSeries => crate::workspacepanes::time_series(app, ui, t),
             RightPane::Diagnostics => crate::workspacepanes::diagnostics(app, ui, t),
             RightPane::Infographics => crate::workspacepanes::infographics(app, ui, t),
             RightPane::Report => crate::reportpane::report(app, ui, t),
