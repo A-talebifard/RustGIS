@@ -314,7 +314,7 @@ fn cached_store(url: &str) -> Result<std::sync::Arc<zarr::Store>, String> {
 
 /// The key a slice is kept by: its store, selection and coordinate system.
 #[cfg(not(target_arch = "wasm32"))]
-fn slice_key(zt: &ZarrTime, i: usize) -> String {
+pub(crate) fn slice_key(zt: &ZarrTime, i: usize) -> String {
     // A folder store rewritten on disk (a model run adding steps) is read again: its metadata's
     // time of change is part of the key.
     let changed = if is_web(&zt.store) {
@@ -426,7 +426,7 @@ fn read_waiting(zt: &ZarrTime, i: usize) -> Result<std::sync::Arc<raster::Raster
 /// Step `i` of a following layer's variable, kept as `key` (its [`slice_key`]), from the kept
 /// slices or read now.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<raster::Raster>, String> {
+pub(crate) fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<raster::Raster>, String> {
     if let Some(r) = kept_slice(&key) {
         return Ok(r);
     }
@@ -442,13 +442,13 @@ fn read_step(zt: &ZarrTime, i: usize, key: String) -> Result<std::sync::Arc<rast
 
 /// A slice kept by [`read_step`], by its key.
 #[cfg(not(target_arch = "wasm32"))]
-fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
+pub(crate) fn kept_slice(key: &str) -> Option<std::sync::Arc<raster::Raster>> {
     slices().lock().ok().and_then(|c| c.iter().find(|(k, _)| k == key).map(|(_, r)| r.clone()))
 }
 
 /// Step `i` of a following layer's variable, read from its store (no slice kept).
 #[cfg(not(target_arch = "wasm32"))]
-fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raster>, String> {
+pub(crate) fn read_slice(zt: &ZarrTime, i: usize) -> Result<Option<raster::Raster>, String> {
     let sel = zt.selection(i);
     let crs = zt.crs.as_deref().map(str::trim).filter(|c| !c.is_empty());
     let read = if is_web(&zt.store) {
@@ -970,8 +970,13 @@ impl ReduceRun {
                     }
                     first = Some((r.width, r.height, r.transform, r.crs));
                 }
-                // One grid for every step: the same size, place and coordinate system.
-                Some(f) if *f != (r.width, r.height, r.transform, r.crs) || vals.len() != n.len() => {
+                // One grid for every step: the same size and coordinate system, its place within a
+                // thousandth of a pixel, as for a trend.
+                Some(f)
+                    if (f.0, f.1, f.3) != (r.width, r.height, r.crs)
+                        || !super::cube::same_grid(&f.2, &r.transform)
+                        || vals.len() != n.len() =>
+                {
                     return Err(format!("step {} is {} × {}, unlike the first ({} × {})", i, r.width, r.height, f.0, f.1));
                 }
                 Some(_) => {}
@@ -1057,56 +1062,10 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         None => 0.0,
         Some(v) => v.as_f64().filter(|v| (0.0..=1.0).contains(v)).ok_or("minValid is a share from 0 to 1")?,
     };
-    let months: Vec<u32> = match p.get("months").filter(|v| !v.is_null()) {
-        None => Vec::new(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|m| m.as_u64().filter(|m| (1..=12).contains(m)).map(|m| m as u32).ok_or("months are numbers from 1 to 12"))
-            .collect::<Result<_, _>>()?,
-        Some(_) => return Err("months is a list of months (1–12)".into()),
-    };
-    let mut src = series_source(s, p)?;
-    let store = if is_web(&src.root) {
-        cached_store(&src.root)?
-    } else {
-        std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
-    };
-    pick_variable(&store, &mut src.sel)?;
-    let var = src.sel.variable.clone();
-    let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
-    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
-        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
-    // Every step a date, so the period and months pick the steps they say.
-    if !dates.iter().all(|d| d.is_finite()) {
-        return Err(format!("{var}'s time axis has a step that isn't a date"));
-    }
-    let date = |k: &str| -> Result<Option<f64>, String> {
-        match p.get(k).filter(|v| !v.is_null()) {
-            None => Ok(None),
-            Some(v) => rustgis_data::time::parse_input(v)
-                .map(Some)
-                .ok_or_else(|| format!("{k} is a date (2015-06-01, a year, or milliseconds since 1970)")),
-        }
-    };
-    let (start, end) = (date("start")?, date("end")?);
-    // The layer's period, when no period is given.
-    let (lo, hi) = match (start, end, src.period) {
-        (None, None, Some((o, n))) => {
-            let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
-            (o, o.saturating_add(n).min(dates.len()))
-        }
-        _ => (0, dates.len()),
-    };
-    let month = |d: f64| rustgis_data::time::format(d, "MM").parse::<u32>().unwrap_or(0);
-    let steps: Vec<usize> = (lo..hi)
-        .filter(|i| {
-            let d = dates.get(*i).copied().unwrap_or(f64::NAN);
-            start.is_none_or(|a| d >= a) && end.is_none_or(|z| d <= z) && (months.is_empty() || months.contains(&month(d)))
-        })
-        .collect();
-    if steps.is_empty() {
-        return Err("no step of the variable falls in the period (and months) asked for".into());
-    }
+    let ZarrCube { zt, period } = zarr_cube(s, p)?;
+    let steps = super::cube::steps(&zt.dates, period, p)?;
+    let months = super::cube::months(p)?;
+    let (var, dates) = (zt.variable.clone(), &zt.dates);
     if steps.len() > rustgis_map::raster::MAX_ZARR_STEPS {
         return Err(format!(
             "{} steps; a summary reads {} at most: take a shorter period",
@@ -1122,9 +1081,47 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         label = format!("{label} (months {})", m.join(","));
     }
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).map_or(label, |n| n.chars().take(200).collect());
+    let root = zt.store.clone();
+    Ok(ReduceRun { zt, steps, stat, min_valid, name, root, variable: var })
+}
+
+/// A Zarr variable's time axis as a data cube (#579): the store and variable to read, all its
+/// dates, and the steps of a following layer's period (else the whole axis).
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ZarrCube {
+    pub zt: ZarrTime,
+    pub period: (usize, usize),
+}
+
+/// The cube of a Zarr layer, or of the store and variable the parameters name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn zarr_cube(s: &Session, p: &Value) -> Result<ZarrCube, String> {
+    let mut src = series_source(s, p)?;
+    let store = if is_web(&src.root) {
+        cached_store(&src.root)?
+    } else {
+        std::sync::Arc::new(zarr::read_metadata(Path::new(&src.root)).map_err(|e| format!("{}: {e}", src.root))?)
+    };
+    pick_variable(&store, &mut src.sel)?;
+    let var = src.sel.variable.clone();
+    let coords = store_files(&src.root, &zarr::coordinate_keys(&store, &var))?;
+    let (dim, dates) = zarr::time_axis(&store, &var, &coords)
+        .ok_or_else(|| format!("{var} has no time dimension (a coordinate with CF units, such as \"days since 2001-01-01\")"))?;
+    // Every step a date, so a period and months pick the steps they say (a summary takes them
+    // in any order; a trend asks for time order itself, in `cube_from`).
+    if !dates.iter().all(|d| d.is_finite()) {
+        return Err(format!("{var}'s time axis has a step that isn't a date"));
+    }
+    let period = match src.period {
+        Some((o, n)) => {
+            let o = usize::try_from(o).unwrap_or(usize::MAX).min(dates.len());
+            (o, o.saturating_add(n).min(dates.len()))
+        }
+        None => (0, dates.len()),
+    };
     let zt = ZarrTime {
         store: src.root.clone(),
-        variable: var.clone(),
+        variable: var,
         index: src.sel.index.iter().filter(|(d, _)| *d != dim).cloned().collect(),
         dim,
         offset: 0,
@@ -1132,7 +1129,7 @@ pub fn reduce_start(s: &Session, p: &Value) -> Result<ReduceRun, String> {
         crs: src.crs.clone(),
         shown: None,
     };
-    Ok(ReduceRun { zt, steps, stat, min_valid, name, root: src.root, variable: var })
+    Ok(ZarrCube { zt, period })
 }
 
 /// The most cells a summary keeps running totals for (12 to 20 bytes each): 32 million, at most

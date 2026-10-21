@@ -399,6 +399,7 @@ struct PutAside {
     style_view: Option<(String, Camera)>,
     #[cfg(not(target_arch = "wasm32"))]
     sql_results: Vec<(u64, String, Option<String>, rustgis_data::source::duckdb::Output)>,
+    trend_results: Vec<(u64, Vec<rustgis_data::raster::Raster>, usize)>,
     edit_counts: std::collections::HashMap<u32, cmd::design::EditCounts>,
 }
 
@@ -533,6 +534,9 @@ pub struct Session {
     /// the id, the query and database (label) they came from, and the result.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sql_results: Vec<(u64, String, Option<String>, rustgis_data::source::duckdb::Output)>,
+    /// Trends the app worked out on a thread, waiting for `cube.trend {"ran"}`: the id, the
+    /// layers and how many dates (see [`cmd::cube::land`]).
+    pub(crate) trend_results: Vec<(u64, Vec<rustgis_data::raster::Raster>, usize)>,
 }
 
 /// The most `layer.addUrl` requests kept for the front end at a time.
@@ -662,6 +666,7 @@ impl Session {
             quiet_failure: false,
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: Vec::new(),
+            trend_results: Vec::new(),
         }
     }
 
@@ -989,6 +994,7 @@ impl Session {
             style_view: self.style_view.take(),
             #[cfg(not(target_arch = "wasm32"))]
             sql_results: take(&mut self.sql_results),
+            trend_results: take(&mut self.trend_results),
             edit_counts: take(&mut self.edit_counts),
         }
     }
@@ -1030,6 +1036,7 @@ impl Session {
             style_view,
             #[cfg(not(target_arch = "wasm32"))]
             sql_results,
+            trend_results,
             edit_counts,
         } = *a;
         (self.undo, self.redo, self.back, self.forward, self.last_camera) = (undo, redo, back, forward, last_camera);
@@ -1041,6 +1048,7 @@ impl Session {
         (self.path, self.model_run, self.style_view) = (path, model_run, style_view);
         (self.pending, self.plugin_runs, self.plugin_retries) = (pending, plugin_runs, plugin_retries);
         (self.downloading, self.downloaded, self.url_requests) = (downloading, downloaded, url_requests);
+        self.trend_results = trend_results;
         #[cfg(feature = "geolibre")]
         {
             self.started = started;
