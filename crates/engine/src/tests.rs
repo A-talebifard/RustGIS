@@ -279,6 +279,41 @@ fn geoprocessing_adds_layers_and_history() {
 }
 
 #[test]
+fn spatial_join_command_joins_layers_and_records_history() {
+    let mut s = world();
+    s.run(
+        "gp.spatialJoin",
+        &json!({
+            "target": "Cities",
+            "join": "Countries",
+            "match": "Intersects",
+            "operation": "Join one to one",
+            "output": "Joined_Cities"
+        }),
+    )
+    .unwrap();
+    let l = s.map().layer_by_name("Joined_Cities").unwrap();
+    assert_eq!(l.dataset.features.len(), s.map().layer_by_name("Cities").unwrap().dataset.features.len());
+    assert!(l.dataset.field_index("join_count").is_some());
+    assert_eq!(s.project.gp_history.len(), 1);
+
+    s.run(
+        "gp.run",
+        &json!({
+            "tool": "spatialJoin",
+            "params": {
+                "target": "Countries",
+                "join": "Cities",
+                "match": "Contains",
+                "output": "Countries_With_Cities"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(s.map().layer_by_name("Countries_With_Cities").is_some());
+}
+
+#[test]
 fn editing_features_and_fields() {
     let mut s = world();
     s.run(
@@ -8436,7 +8471,7 @@ fn literal_keys(body: &str, prefix: &str) -> Vec<String> {
 #[test]
 fn params_name_every_key_a_command_reads() {
     // Read by a shared helper but of no use to the command.
-    let unused = [("profile.alongSelected", "row"), ("sources.remove", "name"), ("sources.remove", "extra")];
+    let unused = [("gp.spatialJoin", "input"), ("profile.alongSelected", "row"), ("sources.remove", "name"), ("sources.remove", "extra")];
     let s = Session::new(Project::default());
     let mut missing = Vec::new();
     let found = keys_read_by_commands();
