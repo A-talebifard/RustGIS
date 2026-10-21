@@ -1096,6 +1096,8 @@ impl Session {
                 m.apply_time();
             }
         }
+        // Zarr layers that follow the slider read the step it is back at.
+        cmd::zarr::follow_time(self);
     }
 
     fn open_layout_name(&self) -> Option<String> {
