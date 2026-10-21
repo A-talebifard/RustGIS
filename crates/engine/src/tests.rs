@@ -8575,6 +8575,34 @@ fn needs_input_reads_descriptions() {
     assert!(s.registry.get("map.zoomIn").is_some_and(|c| !c.needs_input()));
 }
 
+/// A description splits into one entry per parameter, for help that lists them (#662): commas
+/// inside quotes, parentheses, brackets or braces stay in their entry.
+#[test]
+fn param_list_splits_a_description_into_entries() {
+    use crate::{Param, param_list};
+    let desc =
+        r#"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "steps"?: [{"tool": id}, …], "where": "a, b"}"#;
+    let list = param_list(desc).unwrap();
+    let keys: Vec<(&str, bool)> = list.iter().map(|p| (p.key, p.optional)).collect();
+    assert_eq!(keys, [("layer", true), ("class", true), ("steps", true), ("where", false)]);
+    assert_eq!(list[1].text, r#""class"?: name (none: the Default class, by whatever name it has)"#);
+    assert_eq!(param_list("{}"), Some(Vec::<Param>::new()));
+    // An escaped quote (a plugin's description may have one) doesn't end a value early.
+    let escaped = param_list(r#"{"title"?: "a \"quoted, word\"", "n": number}"#).unwrap();
+    assert_eq!(escaped.iter().map(|p| p.key).collect::<Vec<_>>(), ["title", "n"]);
+    assert_eq!(param_list("a GeoJSON text"), None);
+    // Every command's description splits into entries, each led by a key `param_keys` finds: one
+    // cut in the wrong place (an unclosed bracket or quote in its prose) would lead with another.
+    let s = Session::new(Project::default());
+    for c in &s.registry.commands {
+        let list = param_list(c.params).unwrap_or_else(|| panic!("{}: {}", c.id, c.params));
+        let keys = c.param_keys().unwrap_or_default();
+        for p in &list {
+            assert!(keys.contains(&p.key), "{}: entry {:?} in {}", c.id, p.text, c.params);
+        }
+    }
+}
+
 #[test]
 fn param_keys_reads_descriptions() {
     use crate::param_keys;
