@@ -1160,7 +1160,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         }
     }
     if found == 0 {
-        return Err(bad(format!("{}: none of the slice's chunks could be read", a.path)));
+        return Err(DataError::NoChunks(a.path.clone()));
     }
     // Georeferencing from the coordinate arrays.
     let coords = |p: &Option<String>| -> Result<Option<(Vec<f64>, &Array)>> {
