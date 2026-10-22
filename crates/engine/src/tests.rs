@@ -2265,6 +2265,213 @@ fn layout_colorbars_follow_a_raster() {
     assert_eq!(s.project.layouts[0].element(id).map(|e| e.visible), Some(true), "undo brings it back");
 }
 
+/// `layout.publication` (#682): every profile builds a layout that fits its page, the map frame
+/// at a round scale that still fits the extent, the footer boxed in two columns below the map
+/// with long lines wrapped, the tokens filled from the map; a figure leaves its title to the
+/// caption.
+#[test]
+fn publication_layouts_fit_their_pages() {
+    use rustgis_map::layout::ElementKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-publication-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let long =
+        "NDVI: MOD13Q1 v6.1 (NASA LP DAAC), 16-day composites at 250 m, read through the Brazil Data Cube (INPE) and averaged to 1 km";
+    let profiles = [
+        "a4-portrait",
+        "a4-landscape",
+        "a3-portrait",
+        "a3-landscape",
+        "a2-portrait",
+        "a2-landscape",
+        "figure-1col",
+        "figure-1.5col",
+        "figure-2col",
+        "thesis-full",
+        "thesis-half",
+    ];
+    for profile in profiles {
+        let r = s
+            .run(
+                "layout.publication",
+                &json!({"profile": profile, "extent": piaui, "name": profile, "title": "PIAUÍ", "subtitle": "Greening and browning of vegetation: NDVI trend, 2001–2025",
+                        "sources": [long, "Boundaries: IBGE 2022"], "note": "Only cells with a significant trend (p < 0.05) are coloured."}),
+            )
+            .unwrap_or_else(|e| panic!("{profile}: {e}"));
+        let l = s.project.layouts.last().unwrap();
+        assert_eq!(r["name"], profile);
+        let sheet = profile.starts_with('a');
+        for e in &l.elements {
+            assert!(
+                e.x >= -1e-9 && e.y >= -1e-9 && e.x + e.w <= l.width + 1e-6 && e.y + e.h <= l.height + 1e-6,
+                "{profile}: {} at ({}, {}, {}, {}) is off the {} × {} page",
+                e.name,
+                e.x,
+                e.y,
+                e.w,
+                e.h,
+                l.width,
+                l.height
+            );
+        }
+        let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+        let ElementKind::MapFrame { scale, grid: Some(grid), .. } = &frame.kind else { panic!("{profile}: no grid") };
+        // The legend stops short of the scale bar's box, however narrow the frame.
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
+        assert!(named("Legend Box").x + named("Legend Box").w <= named("Scale Box").x, "{profile}: the legend reaches the scale bar");
+        // A round scale, two significant figures, at which the extent still fits.
+        let unit = 10f64.powf(scale.log10().floor() - 1.0);
+        assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
+        let extent = rustgis_geom::Extent::new(-46.8, -11.6, -38.5, -2.2);
+        // Fitted within the graticule's label strips (9 mm beside the frame's sides, 6 mm along its
+        // top and bottom), so the labels cover none of the extent.
+        let (_, fits) = rustgis_map::layout::fit_scale(s.map(), &extent, frame.w - 18.0, frame.h - 12.0).unwrap();
+        assert!(fits <= *scale && *scale < fits * 1.1, "{profile}: 1:{scale} for 1:{fits}");
+        assert_eq!(grid.step, 2.0, "{profile}: Piauí's 9.4° take a 2° graticule");
+        let text = |name: &str| {
+            l.elements.iter().find(|e| e.name == name).map(|e| match &e.kind {
+                ElementKind::Text { text, .. } => text.clone(),
+                _ => panic!("{name} isn't text"),
+            })
+        };
+        if sheet {
+            assert_eq!(text("Title").as_deref(), Some("PIAUÍ"), "{profile}");
+            // The footer under the map, the long source wrapped within its box.
+            let foot = l.elements.iter().find(|e| e.name == "Sources Box").unwrap();
+            assert!(foot.y >= frame.y + frame.h, "{profile}: the footer is under the map");
+            let sources = l.elements.iter().find(|e| e.name == "Sources").unwrap();
+            assert!(sources.x + sources.w <= foot.x + foot.w + 1e-6);
+            let lines = text("Sources").unwrap();
+            assert!(lines.lines().count() >= 3, "{profile}: {lines}");
+            for line in lines.lines() {
+                assert!(
+                    crate::render::report::width_mm(line, 7.0 * l.width.min(l.height) as f32 / 210.0, false) <= sources.w + 1e-6,
+                    "{profile}: {line}"
+                );
+            }
+            // The tokens filled from the map: Web Mercator over WGS 84, the 2° graticule.
+            let reference = text("Reference").unwrap();
+            assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
+            assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
+            assert!(r["warnings"].as_array().unwrap().is_empty(), "{profile}: {r}");
+        } else {
+            assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
+            assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
+            assert!(text("Reference").unwrap().contains("Datum: WGS 84"), "{profile}");
+            assert_eq!(l.width, r["page"][0].as_f64().unwrap());
+        }
+        let png = dir.join(format!("{profile}.png"));
+        s.run("layout.export", &json!({"path": png.display().to_string(), "dpi": 72})).unwrap();
+        assert!(std::fs::metadata(&png).unwrap().len() > 1000, "{profile}");
+    }
+    assert_eq!(s.project.layouts.len(), profiles.len(), "a layout each, the earlier ones untouched");
+    // A long title wraps within the frame, and pushes the map down; the result names every
+    // element for layout.update.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "title": long})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let title = l.elements.iter().find(|e| e.name == "Title").unwrap();
+    let ElementKind::Text { text, size, .. } = &title.kind else { panic!() };
+    assert!(text.lines().count() >= 2, "{text}");
+    for line in text.lines() {
+        assert!(crate::render::report::width_mm(line, *size as f32, true) <= title.w, "{line}: measured bold, as drawn");
+    }
+    let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+    assert!(frame.y >= title.y + title.h);
+    let listed = r["elements"].as_array().unwrap();
+    assert_eq!(listed.len(), l.elements.len());
+    assert!(listed.iter().any(|e| e["name"] == "Map Frame" && e["element"] == frame.id && e["kind"] == "mapFrame"), "{r}");
+    s.project.layouts.pop();
+    // Undone as one command: the layout goes, and the map is as it was (its layers, view and
+    // projection), the legend's sync of streamed layers included.
+    let (layouts, map) = (s.project.layouts.len(), s.map().clone());
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.project.layouts.len(), layouts);
+    let ids = |m: &rustgis_map::Map| m.layers.iter().map(|l| (l.id, l.name.clone(), l.visible)).collect::<Vec<_>>();
+    assert_eq!(ids(s.map()), ids(&map));
+    assert_eq!((s.map().projection.code(), s.map().camera.center), (map.projection.code(), map.camera.center));
+    // A figure says it left out an author and headings given to it, as it does a title.
+    let r =
+        s.run("layout.publication", &json!({"profile": "figure-1col", "extent": piaui, "author": "Me", "headings": ["A", "B"]})).unwrap();
+    let said = r["warnings"].to_string();
+    assert!(said.contains("author goes") && said.contains("headings goes"), "{said}");
+    s.project.layouts.pop();
+    let r = s.run("layout.publication", &json!({"profile": "figure-1col", "extent": piaui, "author": ""})).unwrap();
+    assert!(!r["warnings"].to_string().contains("author"), "an empty author asks for none: {r}");
+    s.project.layouts.pop();
+    // An empty author leaves the authorship out.
+    for none in [json!(""), json!([]), json!(["  "])] {
+        s.run("layout.publication", &json!({"extent": piaui, "author": none})).unwrap();
+        assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Author"), "{none}");
+        s.project.layouts.pop();
+    }
+    // With no sources, the reference alone takes the footer's width; no empty box beside it.
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
+    assert!(l.elements.iter().all(|e| !e.name.starts_with("Sources")));
+    let reference = l.elements.iter().find(|e| e.name == "Reference Box").unwrap();
+    assert!((reference.x - frame.x).abs() < 1e-9 && (reference.w - frame.w).abs() < 1e-9, "{} of {}", reference.w, frame.w);
+    s.project.layouts.pop();
+    // Headings rename what the columns read, filled and wrapped; their elements keep their names.
+    let r = s
+        .run(
+            "layout.publication",
+            &json!({"extent": piaui, "sources": "IBGE", "headings": ["Fontes dos dados, {date}", "Referência cartográfica na projeção {projection}, a mais longa que se possa imaginar"]}),
+        )
+        .unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let heading = l.elements.iter().find(|e| e.name == "Reference Heading").unwrap();
+    let ElementKind::Text { text, .. } = &heading.kind else { panic!() };
+    // Where the wrap breaks depends on the font found, so the words are read across the lines.
+    assert!(text.replace('\n', " ").contains("WEB MERCATOR") && !text.contains('{') && text.lines().count() >= 2, "{text}");
+    // A live token in a heading keeps its case, so the layout still fills it when it draws.
+    let sources = l.elements.iter().find(|e| e.name == "Sources Heading").unwrap();
+    let ElementKind::Text { text, .. } = &sources.kind else { panic!() };
+    assert_eq!(text, "FONTES DOS DADOS, {date}");
+    assert!(l.elements.iter().any(|e| e.name == "Sources Heading") && l.elements.iter().any(|e| e.name == "Reference"), "{r}");
+    let body = l.elements.iter().find(|e| e.name == "Reference").unwrap();
+    assert!(body.y >= heading.y + heading.h - 1e-9, "the reference starts under its wrapped heading");
+    s.project.layouts.pop();
+    // A journal figure is as tall as the map's shape asks: Piauí in Web Mercator is taller than wide.
+    let one = s.project.layouts.iter().find(|l| l.name == "figure-1col").unwrap();
+    assert!(one.width == 90.0 && one.height > 90.0, "{} × {}", one.width, one.height);
+    // Graticule steps and round scales.
+    use crate::cmd::layout::{capitals, datum_of, grid_step, round_scale, step_text};
+    assert_eq!(datum_of("+proj=aea +lat_1=29.5 +datum=NAD83 +units=m").as_deref(), Some("NAD83"));
+    assert_eq!(datum_of("+proj=robin +ellps=WGS84").as_deref(), Some("WGS 84"));
+    assert_eq!(datum_of("+proj=eqearth +R=6371008.8").as_deref(), Some("a sphere"));
+    assert_eq!(datum_of("+proj=moll"), None);
+    // A preset on NAD83 says so, though its name holds no datum.
+    s.run("map.projection", &json!({"type": "usaAlbers"})).unwrap();
+    s.run("layout.publication", &json!({"extent": [-100, 35, -90, 45]})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let ElementKind::Text { text, .. } = &l.elements.iter().find(|e| e.name == "Reference").unwrap().kind else { panic!() };
+    assert!(text.contains("Datum: NAD83"), "{text}");
+    s.project.layouts.pop();
+    assert_eq!(capitals("Fontes, {date} e {pageName}"), "FONTES, {date} E {pageName}");
+    assert_eq!(capitals("Dados {2024 e {só} }"), "DADOS {2024 E {SÓ} }", "a lone or odd brace is text");
+    assert_eq!(grid_step(&rustgis_geom::Extent::new(10.0, 45.0, 11.0, 46.0)), 0.25);
+    assert_eq!(grid_step(&rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0)), 30.0);
+    assert_eq!((step_text(2.0), step_text(0.25), step_text(0.02)), ("2°".to_string(), "15′".to_string(), "1′12″".to_string()));
+    assert_eq!(step_text(0.01), "36″");
+    assert_eq!((round_scale(1_234_567.0), round_scale(4_500_000.0), round_scale(999.0)), (1_300_000.0, 4_500_000.0, 1_000.0));
+    // Refused: an unknown profile, a malformed extent, a footer that leaves the map no room.
+    for (p, said) in [
+        (json!({"profile": "a5-portrait"}), "unknown profile"),
+        (json!({"profile": 5}), "profile is"),
+        (json!({"extent": [10, 0, 5, 1]}), "extent is"),
+        (json!({"extent": [10, 0, 11], "profile": "a4-portrait"}), "extent is"),
+        (json!({"sources": vec![long; 40], "profile": "a4-landscape", "extent": piaui}), "no room"),
+        (json!({"reference": vec![long; 50], "profile": "thesis-half", "extent": piaui}), "no room"),
+    ] {
+        let e = s.run("layout.publication", &p).unwrap_err();
+        assert!(e.contains(said), "{p}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn layouts_compose_export_and_round_trip() {
     use base64::Engine;
@@ -5363,6 +5570,26 @@ fn a_streamed_layer_whose_file_goes_away_shows_an_error_not_stale_features() {
     let l = &s.map().layers[0];
     assert!(l.dataset.features.is_empty());
     assert!(l.source.as_ref().unwrap().error.is_some());
+}
+
+/// `layout.publication` over a streamed layer: the frame's view is read for its legend, which lists
+/// the layer; undone, the layout goes and the layer is streaming from its source as before,
+/// reading a view again when one is drawn.
+#[test]
+fn a_publication_layout_over_a_streamed_layer_is_undone() {
+    let path = grid_fgb("publication", 30);
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": path.display().to_string(), "stream": true})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": [0, 0, 20, 20], "author": ""})).unwrap();
+    assert!(s.project.layouts[0].elements.iter().any(|e| e.name == "Legend"), "the read layer is listed: {r}");
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert!(s.project.layouts.is_empty());
+    let l = &s.map().layers[0];
+    assert!(l.source.as_ref().is_some_and(|src| src.error.is_none()), "still streaming from its source");
+    let v = view_of(&mut s, rustgis_geom::Extent::new(0.0, 0.0, 20.0, 20.0));
+    crate::render::render_png(s.map_mut(), &v).unwrap();
+    assert!(!s.map().layers[0].dataset.features.is_empty(), "it reads the view again");
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

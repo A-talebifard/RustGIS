@@ -927,6 +927,25 @@ fn labeling_group(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
+/// A publication profile's name in the menu: a `tl!` literal each, so the catalogs find it (the
+/// engine's labels, which it matches in English); `None` for a profile added without one.
+fn publication_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "a4-portrait" => tl!("A4 portrait sheet"),
+        "a4-landscape" => tl!("A4 landscape sheet"),
+        "a3-portrait" => tl!("A3 portrait sheet"),
+        "a3-landscape" => tl!("A3 landscape sheet"),
+        "a2-portrait" => tl!("A2 portrait sheet"),
+        "a2-landscape" => tl!("A2 landscape sheet"),
+        "figure-1col" => tl!("Journal figure, 1 column (90 mm)"),
+        "figure-1.5col" => tl!("Journal figure, 1.5 columns (140 mm)"),
+        "figure-2col" => tl!("Journal figure, 2 columns (190 mm)"),
+        "thesis-full" => tl!("Thesis figure, full page (160 × 225 mm)"),
+        "thesis-half" => tl!("Thesis figure, half page (160 × 110 mm)"),
+        _ => return None,
+    })
+}
+
 fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Project", |ui| {
         big(ui, app, "new_map", "New\nMap", "Add a new map to the project.", "map.new", Value::Null, false, false);
@@ -941,6 +960,32 @@ fn project_group(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
+            // A finished sheet or figure of the map view, its texts to fill in on the page.
+            ui.menu_button(tl!("Publication Layout"), |ui| {
+                for profile in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+                    let label = publication_label(profile.id).unwrap_or_else(|| tl!(profile.label));
+                    if ui.button(label).clicked() {
+                        // A sheet is titled with the map's name; a figure's title is its caption's.
+                        let mut p = json!({"profile": profile.id});
+                        if profile.sheet {
+                            p["title"] = json!(app.session.map().name.clone());
+                        }
+                        // The view's extent may not be known (an empty map): said, and the tab stays.
+                        match app.run("layout.publication", p) {
+                            Ok(r) => {
+                                // What the layout couldn't do as asked (a legend clipped, a layer still reading).
+                                let said: Vec<&str> = r["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
+                                if !said.is_empty() {
+                                    app.session.notify(said.join("\n"), false);
+                                }
+                                app.ui.tab = "Publish".into();
+                            }
+                            Err(e) => app.session.notify(e, true),
+                        }
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui.button(tl!("Blank Letter page")).clicked() {
                 let _ = app.run("layout.new", json!({"template": "blank"}));
@@ -4606,6 +4651,15 @@ mod tests {
         assert_eq!(h.state().ws.recording.as_ref().unwrap()[0].params["size"], json!(14.3));
         h.state_mut().run("edit.undo", json!(null)).unwrap();
         assert_eq!(h.state().session.map().layer(id).unwrap().labels.default.size, before);
+    }
+
+    /// Every publication profile has its literal name in the menu, the engine's label word for word
+    /// (the test runs in English), so neither can be renamed without the other.
+    #[test]
+    fn every_publication_profile_is_named_by_a_literal() {
+        for p in rustgis_engine::cmd::layout::PUBLICATION_PROFILES {
+            assert_eq!(publication_label(p.id), Some(p.label), "{}", p.id);
+        }
     }
 
     #[test]
