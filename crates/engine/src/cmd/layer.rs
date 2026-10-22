@@ -480,6 +480,59 @@ fn gdb_path(path: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Adds a File Geodatabase's feature classes and tables (`"layer"` picks one), read without GDAL;
+/// through GDAL, when it is installed, if they can't be (compressed tables, raster fields).
+#[cfg(not(target_arch = "wasm32"))]
+fn add_geodatabase(s: &mut Session, p: &Value, path: &str) -> CmdResult {
+    let layer = ps(p, "layer").map(str::trim).filter(|l| !l.is_empty());
+    let read = match rustgis_data::filegdb::read_dir(Path::new(path), layer) {
+        Ok(read) => read,
+        Err(e) if rustgis_data::source::gdal::available() => {
+            return add_gdal(s, p, path).map_err(|g| format!("{path}: {e}; through GDAL: {g}"));
+        }
+        Err(e) => return Err(format!("{path}: {e}")),
+    };
+    let reads =
+        read.layers.into_iter().map(|(dataset, report)| rustgis_data::io::LayerRead { dataset, report, styles: Vec::new() }).collect();
+    // The tables read, then those it couldn't read (compressed, raster fields), through GDAL when it
+    // is installed; else, or if GDAL can't either, said. The second go on whether the first added.
+    let mut results: Vec<Value> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    match add_reads(s, p, path, reads, Vec::new()) {
+        Ok(r) => results.push(r),
+        Err(e) => failed.push(e),
+    }
+    let gdal = rustgis_data::source::gdal::available();
+    for (table, why) in read.unread {
+        let mut q = p.clone();
+        if let Some(o) = q.as_object_mut() {
+            o.insert("layer".into(), json!(table));
+            o.remove("name");
+        }
+        match gdal.then(|| add_gdal(s, &q, path)) {
+            Some(Ok(r)) => results.push(r),
+            Some(Err(g)) => s.notify(format!("{path}: {table} not read: {why}; through GDAL: {g}"), true),
+            None => s.notify(format!("{path}: {table} not read: {why} (GDAL, when installed, reads it)"), true),
+        }
+    }
+    if results.is_empty() {
+        return Err(if failed.is_empty() { format!("{path}: nothing could be added") } else { failed.join("; ") });
+    }
+    // Something was added (through GDAL): the layers read natively that couldn't be are still said.
+    for e in failed {
+        s.notify(e, true);
+    }
+    // One result, as adding a single file gives it: every layer, the first, and the features.
+    let layers: Vec<Value> = results.iter().filter_map(|r| r.get("layers").and_then(Value::as_array)).flatten().cloned().collect();
+    let tables: Vec<Value> = results.iter().filter_map(|r| r.get("tables").and_then(Value::as_array)).flatten().cloned().collect();
+    let features: u64 = results.iter().filter_map(|r| r.get("features").and_then(Value::as_u64)).sum();
+    let mut out = json!({"layers": layers, "tables": tables, "features": features});
+    if let (Some(o), Some(first)) = (out.as_object_mut(), layers.first()) {
+        o.insert("layer".into(), first.clone());
+    }
+    Ok(out)
+}
+
 fn add_data(s: &mut Session, p: &Value) -> CmdResult {
     let path = s_req(p, "path")?;
     let path = &*gdb_path(path);
@@ -566,6 +619,10 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
             q["name"] = json!(n);
         }
         return super::tiles::add(s, &q);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if rustgis_data::filegdb::is_geodatabase(Path::new(path)) {
+        return add_geodatabase(s, p, path);
     }
     #[cfg(not(target_arch = "wasm32"))]
     if rustgis_data::source::gdal::is_gdal_name(path) {
@@ -666,6 +723,18 @@ pub(crate) fn add_layers(s: &mut Session, p: &Value, file_name: &str, bytes: &[u
             return Err(format!("{file_name}: no layer '{want}' (layers: {})", names.join(", ")));
         }
     }
+    add_reads(s, p, file_name, reads, overlays)
+}
+
+/// Adds the layers a file gave and its ground overlays: a layer that can't be added is skipped
+/// and said, the others are still added. A name given goes to the first layer added.
+fn add_reads(
+    s: &mut Session,
+    p: &Value,
+    file_name: &str,
+    reads: Vec<rustgis_data::io::LayerRead>,
+    overlays: Vec<(String, rustgis_data::raster::Raster)>,
+) -> CmdResult {
     let mut added = Vec::new();
     let mut failed = Vec::new();
     let mut q = p.clone();
@@ -828,6 +897,15 @@ fn file_layers(_s: &mut Session, p: &Value) -> CmdResult {
     let path = s_req(p, "path")?;
     let path = &*gdb_path(path);
     let err = |e: rustgis_data::DataError| format!("{path}: {e}");
+    // A geodatabase read without GDAL; through GDAL if it can't be and GDAL is installed.
+    #[cfg(not(target_arch = "wasm32"))]
+    if rustgis_data::filegdb::is_geodatabase(Path::new(path)) {
+        match rustgis_data::filegdb::layers(Path::new(path)) {
+            Ok(layers) => return Ok(json!({"count": layers.len(), "layers": layers})),
+            Err(_) if rustgis_data::source::gdal::available() => {}
+            Err(e) => return Err(err(e)),
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if rustgis_data::source::gdal::is_gdal_name(path) {
         let layers = rustgis_data::source::gdal::layers(Path::new(path)).map_err(err)?;
