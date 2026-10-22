@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod cmd;
+pub mod connections;
 pub mod geometry_calc;
 pub mod model;
 pub mod project;
@@ -411,6 +412,8 @@ pub struct Session {
     /// Favourite, recent and saved data sources (kept with the app's preferences, not the
     /// project).
     pub sources: sources::Sources,
+    /// Saved connections (`connection.*`): kept with the app's preferences, not the project; never a secret.
+    pub connections: connections::Connections,
     /// How rasters added from now on are drawn (`raster.setDefaultStyle`; kept with the app's
     /// preferences, not the project).
     pub raster_defaults: rustgis_map::RasterDefaults,
@@ -610,6 +613,7 @@ impl Session {
             path: None,
             dirty: false,
             sources: sources::Sources::default(),
+            connections: connections::Connections::default(),
             raster_defaults: rustgis_map::RasterDefaults::default(),
             registry: Registry { commands: cmd::all() },
             revision: 1,
