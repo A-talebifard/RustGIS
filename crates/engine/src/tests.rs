@@ -1148,6 +1148,7 @@ fn hostile_params_never_panic() {
         json!({"id": "", "kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 password=x", "options": "x"}),
         json!({"kind": "wms", "address": "http://127.0.0.1:9/wms", "probe": "x", "answer": 7}),
         json!({"kind": "stac", "address": "http://127.0.0.1:9/stac", "answer": "\u{0}{"}),
+        json!({"id": "c1", "node": "s3:/\u{7}", "probe": true, "answer": 7, "documents": "x"}),
     ];
     let ids: Vec<&str> = Session::new(Project::default()).registry.commands.iter().map(|c| c.id).collect();
     let streamed = grid_fgb("hostile", 20);
@@ -6800,6 +6801,18 @@ fn wcs_coverages_and_catalogue_records() {
     );
     let full = s.run("service.coverage", &json!({"url": url, "layer": "soc", "text": caps, "describe": describe, "bbox": "full"})).unwrap();
     assert_eq!(full["bbox"], json!([5.0, 49.2, 5.8, 50.0]));
+    // The same coverage browsed from a saved connection: the add it lists runs as it is.
+    s.run("connection.new", &json!({"kind": "wcs", "address": url, "name": "Soils"})).unwrap();
+    let browsed = s.run("connection.browse", &json!({"id": "Soils", "answer": caps})).unwrap();
+    let child = &browsed["children"][0];
+    assert_eq!((child["what"].as_str(), child["add"]["command"].as_str()), (Some("coverage"), Some("service.add")), "{browsed}");
+    let mut listed = child["add"]["params"].clone();
+    listed["text"] = json!(caps);
+    listed["describe"] = json!(describe);
+    listed["bbox"] = json!("full");
+    let layers = s.map().layers.len();
+    s.run("service.add", &listed).unwrap();
+    assert_eq!(s.map().layers.len(), layers + 1);
     let (err, _) = serve_file(b"<ows:ExceptionReport>no</ows:ExceptionReport>".to_vec(), false);
     let p = json!({"url": format!("{err}/wcs"), "layer": "soc", "text": caps, "describe": describe, "bbox": "full"});
     assert!(s.run("service.add", &p).unwrap_err().contains("error"));
@@ -8856,7 +8869,15 @@ fn connections_commands() {
     assert_eq!(renamed["name"], "wms (2)");
     assert_ne!(default["id"], renamed["id"]);
     assert!(crate::sources::holds_secret(&json!({"id":"x","password":"p"})));
-    for id in ["connection.new", "connection.edit", "connection.duplicate", "connection.remove", "connection.login", "connection.test"] {
+    for id in [
+        "connection.new",
+        "connection.edit",
+        "connection.duplicate",
+        "connection.remove",
+        "connection.login",
+        "connection.test",
+        "connection.browse",
+    ] {
         assert!(crate::cmd::plugins::user_only(id), "{id}");
     }
     assert!(!crate::cmd::plugins::user_only("connection.list"));
@@ -8965,6 +8986,195 @@ fn connection_test_probes_and_answers() {
     );
     assert!(s.run("connection.test", &json!({"probe":true})).unwrap_err().contains("id, or kind and address"));
     assert!(s.connections.connections.is_empty());
+}
+
+/// Browsing a saved connection lists what each kind offers, a level at a time, with the command
+/// that adds each dataset; offline, with the answers supplied. A node that isn't the
+/// connection's is refused, and nothing browsed is saved or undoable.
+#[test]
+fn connection_browse_levels_and_adds() {
+    use crate::render::rustgis_tiles::s3;
+    let mut s = Session::new(Project::default());
+    let new = |s: &mut Session, p: Value| s.run("connection.new", &p).unwrap();
+    let wms_caps = r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="https://a.example/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer><Layer><Name>b</Name><Title>B</Title></Layer></Layer></Capability></WMS_Capabilities>"#;
+
+    // WMS: the address read, its layers, and the add that adds one.
+    new(&mut s, json!({"kind": "wms", "address": "https://a.example/wms", "name": "W"}));
+    let v = s.run("connection.browse", &json!({"id": "W", "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.contains("REQUEST=GetCapabilities")), "{v}");
+    let v = s.run("connection.browse", &json!({"id": "W", "answer": wms_caps})).unwrap();
+    assert_eq!(v["service"], json!({"url": "https://a.example/wms", "type": "wms"}));
+    let first = v["children"][0].clone();
+    assert_eq!(first["what"], "map");
+    assert_eq!(first["name"], "A");
+    assert_eq!(first["add"]["command"], "service.add");
+    assert_eq!(first["add"]["params"]["url"], "https://a.example/wms");
+    assert_eq!(first["add"]["params"]["type"], "wms");
+    assert_eq!(first["add"]["params"]["layer"], "a");
+    assert!(first["add"]["params"].get("source_url").is_some());
+    assert_eq!(v["children"].as_array().unwrap().len(), 2);
+    let before = s.map().tiles.len();
+    let mut add = first["add"]["params"].clone();
+    add["text"] = json!(wms_caps);
+    s.run("service.add", &add).unwrap();
+    assert_eq!(s.map().tiles.len(), before + 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.map().tiles.len(), before);
+
+    // ArcGIS: a directory's folder is a node of its own address.
+    new(&mut s, json!({"kind": "arcgis", "address": "https://x.example.org/arcgis/rest/services", "name": "Arc"}));
+    let dir = r#"{"currentVersion": 11, "folders": ["Hydro"], "services": [{"name": "Topo", "type": "MapServer"}]}"#;
+    let v = s.run("connection.browse", &json!({"id": "Arc", "answer": dir})).unwrap();
+    let folder = "service:arcgis:https://x.example.org/arcgis/rest/services/Hydro";
+    let child = v["children"].as_array().unwrap().iter().find(|c| c["node"] == folder).unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(child["what"], "folder");
+    assert_eq!(child["name"], "Hydro");
+    let v = s.run("connection.browse", &json!({"id": "Arc", "node": folder, "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.starts_with("https://x.example.org/arcgis/rest/services/Hydro")), "{v}");
+
+    // CSW: a record, the service it links to as a node, and more records than listed.
+    new(&mut s, json!({"kind": "csw", "address": "https://cat.example.org/csw", "name": "Cat"}));
+    let records = r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <csw:SearchResults numberOfRecordsMatched="3" nextRecord="2"><csw:Record><dc:title>Forests</dc:title>
+          <dc:URI protocol="OGC:WMS">https://geo.example.org/wms</dc:URI><dc:URI protocol="OGC:WFS">http://192.168.1.2/wfs</dc:URI>
+        </csw:Record></csw:SearchResults></csw:GetRecordsResponse>"#;
+    let v = s.run("connection.browse", &json!({"id": "Cat", "answer": records})).unwrap();
+    assert_eq!(v["children"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["children"][0]["what"], "record");
+    assert_eq!(v["children"][0]["children"][0]["node"], "service:wms:https://geo.example.org/wms");
+    assert_eq!((v["matched"].as_u64(), v["truncated"].as_bool()), (Some(3), Some(true)));
+    assert!(v.get("next").is_none());
+
+    // STAC: collections, a collection's search, and an item's asset with the add of it.
+    new(&mut s, json!({"kind": "stac", "address": "https://s.example/v1", "name": "Stac"}));
+    let v = s.run("connection.browse", &json!({"id": "Stac", "probe": true})).unwrap();
+    assert_eq!(v["fetch"], "https://s.example/v1/collections");
+    let v = s.run("connection.browse", &json!({"id": "Stac", "answer": r#"{"collections":[{"id":"c1","title":"C"}]}"#})).unwrap();
+    assert_eq!(v["children"][0]["node"], "collection:c1");
+    assert_eq!(v["children"][0]["options"], true);
+    let v = s.run("connection.browse", &json!({"id": "Stac", "node": "collection:c1", "probe": true})).unwrap();
+    let fetch = v["fetch"].as_str().unwrap();
+    assert!(fetch.contains("/search?") && fetch.contains("collections=c1") && fetch.contains("limit=20"), "{fetch}");
+    let self_link = "https://s.example/v1/collections/c1/items/i1";
+    let items = json!({"type": "FeatureCollection", "numberMatched": 1, "features": [{
+        "type": "Feature", "id": "i1", "collection": "c1", "bbox": [0, 0, 1, 1], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+        "assets": {"visual": {"href": "https://s.example/a.tif", "type": "image/tiff; application=geotiff"}},
+        "links": [{"rel": "self", "href": self_link}]}]});
+    let v = s.run("connection.browse", &json!({"id": "Stac", "node": "collection:c1", "answer": items.to_string()})).unwrap();
+    assert_eq!(v["children"][0]["what"], "item");
+    assert_eq!(
+        v["children"][0]["children"][0]["add"],
+        json!({"command": "stac.addAsset", "params": {"url": self_link, "asset": "visual", "name": "i1 visual"}})
+    );
+    assert!(v.get("truncated").is_none());
+
+    // A static STAC catalog: catalogs and collections, then a collection's items, each opened
+    // for its assets.
+    new(&mut s, json!({"kind": "stac", "address": "https://s.example/static/catalog.json", "name": "Static"}));
+    let root = json!({"type": "Catalog", "id": "r", "links": [{"rel": "child", "href": "./c1/collection.json", "title": "C1"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "answer": root.to_string()})).unwrap();
+    assert_eq!(v["children"][0]["node"], "catalog:https://s.example/static/c1/collection.json");
+    let collection = json!({"type": "Collection", "id": "c1", "links": [
+        {"rel": "item", "href": "./i1/i1.json", "title": "Scene 1"}, {"rel": "child", "href": "./sub/catalog.json", "title": "Sub"}]});
+    let node = "catalog:https://s.example/static/c1/collection.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": node, "answer": collection.to_string()})).unwrap();
+    let kinds: Vec<_> =
+        v["children"].as_array().unwrap().iter().map(|c| (c["what"].as_str().unwrap(), c["node"].as_str().unwrap())).collect();
+    assert_eq!(
+        kinds,
+        [("catalog", "catalog:https://s.example/static/c1/sub/catalog.json"), ("item", "item:https://s.example/static/c1/i1/i1.json")]
+    );
+    let item_node = "item:https://s.example/static/c1/i1/i1.json";
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "probe": true})).unwrap();
+    assert_eq!(v["fetch"], "https://s.example/static/c1/i1/i1.json");
+    let item = json!({"type": "Feature", "id": "i1", "collection": "c1", "bbox": [0, 0, 1, 1], "geometry": null,
+        "properties": {"datetime": "2024-01-01T00:00:00Z"},
+        "assets": {"visual": {"href": "https://s.example/static/a.tif", "type": "image/tiff; application=geotiff"}},
+        "links": [{"rel": "self", "href": "https://s.example/static/c1/i1/i1.json"}]});
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": item.to_string()})).unwrap();
+    assert_eq!(
+        v["children"][0]["add"],
+        json!({"command": "stac.addAsset", "params": {"url": "https://s.example/static/c1/i1/i1.json", "asset": "visual", "name": "i1 visual"}})
+    );
+    // An asset's key names its item, so the same file under two items is two rows.
+    assert_eq!(v["children"][0]["key"], "https://s.example/static/c1/i1/i1.json#visual");
+    // A relative asset address is resolved against the item's own file.
+    let relative = item.to_string().replace(r#""assets":{"#, r#""assets":{"data":{"href":"./data/b.tif","type":"image/tiff"},"#);
+    let v = s.run("connection.browse", &json!({"id": "Static", "node": item_node, "answer": relative})).unwrap();
+    let hrefs: Vec<&str> = v["children"].as_array().unwrap().iter().filter_map(|c| c["href"].as_str()).collect();
+    assert!(hrefs.contains(&"https://s.example/static/c1/i1/data/b.tif"), "{hrefs:?}");
+    // An item node belongs to a STAC connection, and is judged as its documents are.
+    assert!(s.run("connection.browse", &json!({"id": "W", "node": item_node})).is_err());
+    assert!(s.run("connection.browse", &json!({"id": "Static", "node": "item:http://127.0.0.1:9/i.json"})).is_err());
+    // S3: buckets from the connection's options need no fetch; a bucket's level is read.
+    new(&mut s, json!({"kind": "s3", "name": "BrowseB", "options": {"credentials": "none", "buckets": "bkt1"}}));
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "probe": true})).unwrap();
+    assert!(v["fetch"].is_null(), "{v}");
+    let v = s.run("connection.browse", &json!({"id": "BrowseB"})).unwrap();
+    assert_eq!(v["children"][0]["node"], "s3:bkt1/");
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "node": "s3:bkt1/", "probe": true})).unwrap();
+    assert!(v["fetch"].as_str().is_some_and(|f| f.contains("bkt1")), "{v}");
+    let listing = "<ListBucketResult><CommonPrefixes><Prefix>p/</Prefix></CommonPrefixes><Contents><Key>p.tif</Key><Size>5</Size></Contents><Contents><Key>q/</Key><Size>0</Size></Contents></ListBucketResult>";
+    let v = s.run("connection.browse", &json!({"id": "BrowseB", "node": "s3:bkt1/", "answer": listing})).unwrap();
+    assert_eq!(v["children"][0]["node"], "s3:bkt1/p/");
+    assert_eq!(v["children"][0]["name"], "p/");
+    assert_eq!(v["children"][1]["add"]["params"]["url"], "s3://bkt1/p.tif");
+    assert_eq!(v["children"].as_array().unwrap().len(), 2, "{v}");
+    s3::disconnect("BrowseB");
+
+    // Nodes that aren't the connection's, and ones that are hostile.
+    let long = "x".repeat(5000);
+    for (id, node) in [
+        ("W", "collection:x"),
+        ("BrowseB", "s3:BAD_/"),
+        ("W", long.as_str()),
+        ("W", "service:ftp:x"),
+        ("W", "service:wms:http://127.0.0.1:9/wms"),
+        ("Stac", "catalog:http://127.0.0.1:9/c.json"),
+        ("Stac", "s3:bkt1/"),
+        ("W", "nope"),
+        ("W", "a\u{7}b"),
+    ] {
+        let e = s.run("connection.browse", &json!({"id": id, "node": node})).unwrap_err();
+        assert!(!e.is_empty());
+    }
+    assert!(s.run("connection.browse", &json!({"id": "missing"})).unwrap_err().contains("no connection"));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        new(&mut s, json!({"kind": "postgres", "address": "postgres:host=127.0.0.1 port=9 dbname=x user=u", "name": "Pg"}));
+        assert!(!s.run("connection.browse", &json!({"id": "Pg"})).unwrap_err().is_empty());
+    }
+    // A catalogue's download link too long to be one (the parser keeps addresses to 2000 bytes) is not listed.
+    let long_link = format!("https://files.example.org/{}.tif", "a".repeat(5000));
+    let records = format!(
+        r#"<csw:GetRecordsResponse xmlns:csw="http://www.opengis.net/cat/csw/2.0.2" xmlns:dc="http://purl.org/dc/elements/1.1/"><csw:SearchResults numberOfRecordsMatched="1"><csw:Record><dc:title>Files</dc:title>
+          <dc:URI protocol="WWW:DOWNLOAD">https://files.example.org/a.tif</dc:URI><dc:URI protocol="WWW:DOWNLOAD">{long_link}</dc:URI></csw:Record></csw:SearchResults></csw:GetRecordsResponse>"#
+    );
+    let v = s.run("connection.browse", &json!({"id": "Cat", "answer": records})).unwrap();
+    let links = v["children"][0]["children"].as_array().unwrap();
+    assert_eq!(links.len(), 1, "{v}");
+    assert_eq!(links[0]["add"]["params"]["url"], "https://files.example.org/a.tif");
+    assert!(v.get("truncated").is_none(), "{v}");
+    // An answer larger than a service document may be is refused before it is parsed.
+    let huge = "x".repeat(65 << 20);
+    assert!(s.run("connection.browse", &json!({"id": "W", "answer": huge})).unwrap_err().contains("too large"));
+    assert!(
+        s.run("connection.browse", &json!({"id": "W", "answer": "<x/>", "documents": [{"url": "https://a.example/x", "text": huge}]}))
+            .unwrap_err()
+            .contains("too large")
+    );
+    // An OGC API's feature collections are imported together: listed, with options, not added alone.
+    new(&mut s, json!({"kind": "ogcapi", "address": "https://o.example/collections", "name": "Ogc"}));
+    let collections = r#"{"collections":[{"id":"lakes","title":"Lakes","links":[{"rel":"items","type":"application/geo+json","href":"https://o.example/collections/lakes/items"}]}]}"#;
+    let v = s.run("connection.browse", &json!({"id": "Ogc", "answer": collections})).unwrap();
+    assert_eq!((v["children"][0]["what"].as_str(), v["children"][0]["options"].as_bool()), (Some("features"), Some(true)), "{v}");
+    assert!(v["children"][0].get("add").is_none(), "{v}");
+    let saved = s.connections.connections.len();
+    assert!(saved >= 5);
+    s.run("connection.browse", &json!({"id": "W", "answer": wms_caps})).unwrap();
+    assert_eq!(s.connections.connections.len(), saved);
+    assert!(!s.can_undo());
 }
 
 fn rustgis_engine_sources_roundtrip(text: &str) -> crate::sources::Sources {

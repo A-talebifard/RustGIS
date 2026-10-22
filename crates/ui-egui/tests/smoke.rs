@@ -1695,6 +1695,89 @@ fn connections_test_feedback_tracks_edited_inputs() {
     assert!(h.state().session.connections.connections.is_empty());
 }
 
+/// Expanding a connection lists its datasets, a click selects and Add Selected adds each as its
+/// own undo step, and Refresh forgets the list.
+#[test]
+fn connections_tree_browses_and_adds() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let body = format!(
+            r#"<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms" xmlns:xlink="http://www.w3.org/1999/xlink"><Service><Title>Local</Title></Service><Capability><Request><GetMap><Format>image/png</Format><DCPType><HTTP><Get><OnlineResource xlink:href="http://{addr}/wms?"/></Get></HTTP></DCPType></GetMap></Request><Layer><CRS>EPSG:3857</CRS><Layer><Name>a</Name><Title>A</Title></Layer><Layer><Name>b</Name><Title>B</Title></Layer></Layer></Capability></WMS_Capabilities>"#
+        );
+        for stream in listener.incoming().take(1) {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(body.as_bytes());
+        }
+    });
+    // Frames 0.05 s apart, so two clicks fall within egui's double-click delay.
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_max_steps(64).with_step_dt(0.05).build_ui_state(
+        |ui, app: &mut RustGisApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        RustGisApp::with_sample(),
+    );
+    h.state_mut().run("connection.new", json!({"kind":"wms","address":format!("http://{addr}/wms"),"name":"Local"})).unwrap();
+    h.state_mut().run("ui.pane.sources", json!({})).unwrap();
+    h.step();
+    assert!(h.query_by_label("A").is_none(), "nothing is listed before the connection is opened");
+    h.get_by_label("Local").click();
+    for _ in 0..100 {
+        h.step();
+        if h.query_by_label("A").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.query_by_label("A").is_some(), "the layers are listed under the connection");
+    let before = h.state().session.map().tiles.len();
+    h.get_by_label("A").click();
+    h.step();
+    h.get_by_label("B").click();
+    h.step();
+    assert_eq!(h.state().ui.connection_tree.picks.len(), 2);
+    // The selection is added from a dataset's menu: each layer is its own undo step.
+    h.get_by_label("B").click_secondary();
+    h.step();
+    h.step();
+    h.get_by_label("Add Selected (2)").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.map().tiles.len(), before + 2);
+    assert!(h.state().ui.connection_tree.picks.is_empty());
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    // Each layer was its own step: one undo takes one layer.
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    assert_eq!(h.state().session.map().tiles.len(), before);
+    // A double-click adds the one dataset, leaving nothing selected.
+    // (egui counts clicks in a row: let the earlier ones age out of its triple-click window first.)
+    for _ in 0..14 {
+        h.step();
+    }
+    h.get_by_label("A").click();
+    h.step();
+    h.get_by_label("A").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.map().tiles.len(), before + 1);
+    assert!(h.state().ui.connection_tree.picks.is_empty());
+    h.state_mut().run("edit.undo", json!(null)).unwrap();
+    assert_eq!(h.state().session.map().tiles.len(), before);
+    h.get_by_label("Local").click_secondary();
+    h.step();
+    h.get_by_label("Refresh").click();
+    h.step();
+    h.step();
+    assert!(h.query_by_label("A").is_none(), "refreshing forgets the list until it is read again");
+}
+
 /// Save in the web app (issue #197): the browser has no save dialog, so the first Save and every
 /// Save As ask for the file name, and Save then downloads under it; an opened file keeps its name.
 #[test]
