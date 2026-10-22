@@ -440,8 +440,11 @@ pub fn write_path_in(ds: &Dataset, path: &Path, crs: Crs) -> Result<usize> {
                 // The .shp keeps the name given (`Roads.SHP` stays so); the others take its stem.
                 let target = if *e == "shp" { path.to_path_buf() } else { path.with_extension(e) };
                 let tmp = temp_beside(&target)?;
-                written.push((tmp.clone(), target));
-                write_new(&tmp, bytes)
+                let result = write_new(&tmp, bytes);
+                if result.is_ok() {
+                    written.push((tmp, target));
+                }
+                result
             });
             if let Err(e) = staged {
                 for (tmp, _) in &written {
@@ -527,11 +530,13 @@ pub(crate) fn temp_beside(path: &Path) -> std::io::Result<std::path::PathBuf> {
 /// removes it on failure.
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
     let res = (|| {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
         f.write_all(bytes)?;
         f.sync_all()
     })();
+    // Close before removing a failed write, including on Windows.
+    drop(f);
     if res.is_err() {
         let _ = std::fs::remove_file(path);
     }
@@ -1865,6 +1870,145 @@ pub(crate) fn group_rings(rings: Vec<(Vec<Coord>, bool)>) -> Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercises caller cleanup through the public Shapefile writer, one fresh process per collision.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn shapefile_staging_collisions_preserve_existing_entries() -> std::io::Result<()> {
+        let (original, _) =
+            read_geojson(r#"{"type":"Feature","properties":{"name":"old"},"geometry":{"type":"Point","coordinates":[1,2]}}"#, "roads")
+                .map_err(std::io::Error::other)?;
+        let (parts, _) = shapefile_parts(&original).map_err(std::io::Error::other)?;
+        const CHILD: &str = "RUSTGIS_SHAPEFILE_STAGING_COLLISION";
+        let Ok(case) = std::env::var(CHILD) else {
+            let kinds: &[&str] = if cfg!(unix) { &["file", "live", "dangling"] } else { &["file"] };
+            for index in 0..parts.len() {
+                for kind in kinds {
+                    let output = std::process::Command::new(std::env::current_exe()?)
+                        .args([
+                            "--exact",
+                            "io::tests::shapefile_staging_collisions_preserve_existing_entries",
+                            "--nocapture",
+                            "--test-threads=1",
+                        ])
+                        .env(CHILD, format!("{index}:{kind}"))
+                        .output()?;
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert!(
+                        output.status.success()
+                            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+                            && stdout.contains(&format!("collision case completed: {index}:{kind}")),
+                        "part={index} kind={kind}: {}{}",
+                        stdout,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+            println!("collision scenarios: {}", parts.len() * kinds.len());
+            return Ok(());
+        };
+        let (index, kind) = case.split_once(':').ok_or_else(|| std::io::Error::other("missing collision case"))?;
+        let index = index.parse::<usize>().map_err(std::io::Error::other)?;
+        if !matches!(kind, "file" | "live" | "dangling") {
+            return Err(std::io::Error::other("unknown collision kind"));
+        }
+        let workspace = tempfile::Builder::new().prefix("rustgis-shp-collision-").tempdir()?;
+        let root = workspace.path();
+        let path = root.join("roads.SHP");
+        let destination = |extension: &str| if extension == "shp" { path.clone() } else { path.with_extension(extension) };
+        for (extension, bytes) in &parts {
+            std::fs::write(destination(extension), bytes)?;
+        }
+        let (extension, _) = parts.get(index).ok_or_else(|| std::io::Error::other("collision part out of range"))?;
+        let target = destination(extension);
+        // This child runs only this test: write_path's first staging counter is zero.
+        let mut name = std::ffi::OsString::from(".");
+        name.push(target.file_name().ok_or_else(|| std::io::Error::other("missing part name"))?);
+        name.push(format!(".{}.{index}.tmp", std::process::id()));
+        let collision = target.with_file_name(name);
+        #[cfg(unix)]
+        let link_target = root.join("link-target");
+        if kind == "file" {
+            std::fs::write(&collision, b"unrelated entry")?;
+        }
+        #[cfg(unix)]
+        if kind != "file" {
+            if kind == "live" {
+                std::fs::write(&link_target, b"unrelated target")?;
+            }
+            std::os::unix::fs::symlink(&link_target, &collision)?;
+        }
+        let (replacement, _) =
+            read_geojson(r#"{"type":"Feature","properties":{"name":"new"},"geometry":{"type":"Point","coordinates":[3,4]}}"#, "roads")
+                .map_err(std::io::Error::other)?;
+        let result = write_path(&replacement, &path);
+        assert!(matches!(&result, Err(DataError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists), "{result:?}");
+        if kind == "file" {
+            assert_eq!(std::fs::read(&collision)?, b"unrelated entry");
+        }
+        #[cfg(unix)]
+        if kind != "file" {
+            assert_eq!(std::fs::read_link(&collision)?, link_target);
+            if kind == "live" {
+                assert_eq!(std::fs::read(&link_target)?, b"unrelated target");
+            } else {
+                assert!(!link_target.exists());
+            }
+        }
+        for (extension, bytes) in &parts {
+            assert_eq!(&std::fs::read(destination(extension))?, bytes, "original {extension} changed");
+        }
+        assert_eq!(std::fs::read_dir(root)?.count(), parts.len() + 1 + usize::from(kind == "live"), "owned staging files were not cleaned");
+        std::fs::remove_file(collision)?;
+        assert_eq!(write_path(&replacement, &path).map_err(std::io::Error::other)?, 0);
+        for (extension, bytes) in shapefile_parts(&replacement).map_err(std::io::Error::other)?.0 {
+            assert_eq!(std::fs::read(destination(extension))?, bytes, "retry changed {extension}");
+        }
+        workspace.close()?;
+        println!("collision case completed: {case}");
+        Ok(())
+    }
+
+    #[test]
+    fn staging_collision_preserves_the_existing_file() -> std::io::Result<()> {
+        let path = temp_beside(&std::env::temp_dir().join("rustgis-staging-collision"))?;
+        write_new(&path, b"unrelated existing file")?;
+        let error = write_new(&path, b"must not replace").err().ok_or_else(|| std::io::Error::other("collision succeeded"))?;
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path)?, b"unrelated existing file");
+        std::fs::remove_file(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_collision_preserves_symlinks_and_their_targets() -> std::io::Result<()> {
+        let target = temp_beside(&std::env::temp_dir().join("rustgis-staging-target"))?;
+        let link = temp_beside(&target)?;
+        write_new(&target, b"unrelated target")?;
+        std::os::unix::fs::symlink(&target, &link)?;
+        assert!(write_new(&link, b"must not follow").is_err());
+        assert_eq!(std::fs::read_link(&link)?, target);
+        assert_eq!(std::fs::read(&target)?, b"unrelated target");
+        std::fs::remove_file(&target)?;
+        assert!(write_new(&link, b"must not replace dangling link").is_err());
+        assert_eq!(std::fs::read_link(&link)?, target);
+        assert!(!target.exists());
+        std::fs::remove_file(link)
+    }
+
+    #[test]
+    fn write_atomic_failed_install_preserves_destination_and_removes_staging() -> std::io::Result<()> {
+        let root = temp_beside(&std::env::temp_dir().join("rustgis-atomic-failed-install"))?;
+        std::fs::create_dir(&root)?;
+        let destination = root.join("occupied");
+        std::fs::create_dir(&destination)?;
+        let marker = destination.join("keep.txt");
+        std::fs::write(&marker, b"keep destination contents")?;
+        assert!(write_atomic(&destination, b"must not replace directory").is_err());
+        assert_eq!(std::fs::read(marker)?, b"keep destination contents");
+        assert_eq!(std::fs::read_dir(&root)?.count(), 1, "failed install left a staging file");
+        std::fs::remove_dir_all(root)
+    }
 
     #[test]
     fn topojson_named_json_from_disk() {
