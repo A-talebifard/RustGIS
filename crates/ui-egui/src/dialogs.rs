@@ -1195,7 +1195,7 @@ fn coordinate_system(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> boo
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(tl!("EPSG or ESRI code"));
-                let r = ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).hint_text("3035").desired_width(110.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut app.dialogs.a).hint_text("3035, vn2000tm3").desired_width(120.0));
                 if r.changed() && !app.dialogs.a.trim().is_empty() {
                     app.dialogs.text = typed_crs(&app.dialogs.a);
                 }
@@ -1232,16 +1232,38 @@ fn coordinate_system(app: &mut RustGisApp, ui: &mut egui::Ui, t: &Tokens) -> boo
     close
 }
 
+/// Formats degrees as an integer if whole (e.g. 105°), or with decimal places if fractional (e.g. 105.75°).
+pub(crate) fn format_degrees(deg: f64) -> String {
+    if (deg - deg.round()).abs() < 1e-6 { format!("{:.0}°", deg) } else { format!("{deg}°") }
+}
+
 /// The chosen preset's parameters (opengeos/RustGIS#517): the central meridian, and a conic's
 /// standard parallels, each written back into the chosen code. Nothing for a preset without any.
 fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
-    use rustgis_engine::map::projection::{parse_preset, preset_code, preset_params, preset_value};
+    use rustgis_engine::map::projection::{VN2000_UI_PROVINCES, parse_preset, preset_code, preset_params, preset_value};
+    // A province typed by name is already the preset (`typed_crs`), and `vn2000:hanoi` is one too.
     let Ok(Some((id, params))) = parse_preset(&app.dialogs.text) else { return };
     let takes = preset_params(id);
     if takes.is_empty() {
         return;
     }
     let mut next = params.clone();
+    if id == "vn2000tm3" {
+        let default_lon = preset_value(id, "lon_0").unwrap_or(105.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Provinces:")).weak());
+            for &(p_name, lon) in VN2000_UI_PROVINCES {
+                let label = crate::i18n::fmt("{name} ({lon})", &[("name", p_name), ("lon", &format_degrees(lon))]);
+                if ui.small_button(&label).clicked() {
+                    next.retain(|(k, _)| *k != "lon_0");
+                    if (lon - default_lon).abs() > 1e-6 {
+                        next.push(("lon_0", lon));
+                    }
+                }
+            }
+        });
+        ui.add_space(2.0);
+    }
     egui::Grid::new("preset_params").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
         for p in takes {
             let label = match p.key {
@@ -1275,10 +1297,17 @@ fn preset_fields(app: &mut RustGisApp, ui: &mut egui::Ui) {
 }
 
 /// A typed coordinate system code: `ESRI:102033` or `Epsg: 3035` as it is (`lookup` reads the
-/// prefix in any case and spacing), a bare number as an EPSG code.
+/// prefix in any case and spacing), a bare number as an EPSG code, or a Vietnamese province with
+/// the `vn2000:` prefix (`vn2000:hanoi`); a bare name such as `hue` is not taken for one.
 pub(crate) fn typed_crs(text: &str) -> String {
     let text = text.trim();
-    if text.starts_with(|c: char| c.is_ascii_digit()) { format!("EPSG:{text}") } else { text.to_string() }
+    if text.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("EPSG:{text}")
+    } else if let Some(lon) = rustgis_engine::map::projection::resolve_vn2000_alias(text) {
+        format!("vn2000tm3 +lon_0={lon}")
+    } else {
+        text.to_string()
+    }
 }
 
 /// What a coordinate system is: its kind, area of use, definition and epsg.io page.
@@ -1302,29 +1331,43 @@ fn crs_details(ui: &mut egui::Ui, chosen: &str, current: &str, t: &Tokens) {
     let preset = rustgis_engine::map::projection::parse_preset(&code).ok().flatten();
     let tuned = preset.as_ref().is_some_and(|(_, p)| !p.is_empty());
     let (kind, page): (&str, Option<String>) = match preset.map_or(code.as_str(), |(id, _)| id) {
-        "mercator" => ("World, conformal: the usual web map; areas grow towards the poles.", Some("3857".into())),
-        "globe" => ("A 3D globe seen from space.", None),
-        "equirectangular" => ("World, cylindrical: equal steps of longitude and latitude.", Some("4087".into())),
-        "miller" => ("World, cylindrical: a compromise between Mercator and equal steps.", Some("54003".into())),
-        "mollweide" => ("World, equal-area: true sizes, shapes bend towards the edges.", Some("54009".into())),
-        "cylindricalEqualArea" => ("World, equal-area, cylindrical: true sizes, flattened near the poles.", Some("54034".into())),
-        "robinson" => ("World, compromise: neither equal-area nor conformal, balanced for wall maps.", Some("54030".into())),
-        "equalEarth" => ("World, equal-area: true sizes with a Robinson-like look.", Some("8857".into())),
-        "naturalEarth" => ("World, compromise: rounded corners, gentle shapes near the poles.", None),
-        "winkelTripel" => ("World, compromise: low overall distortion, used for world atlases.", Some("54042".into())),
-        "eckertIV" => ("World, equal-area: true sizes with rounded poles.", Some("54012".into())),
-        "northPolar" => ("Polar, conformal: the Arctic and the northern lands.", None),
-        "southPolar" => ("Polar, conformal: Antarctica and the Southern Ocean.", Some("3031".into())),
-        "europeEqualArea" => ("Regional, equal-area: the European standard for statistics.", Some("3035".into())),
-        "usaAlbers" => ("Regional, equal-area: the contiguous United States.", Some("5070".into())),
-        "albers" => ("Conic, equal-area: true sizes across a mid-latitude region; set its meridian and parallels to the region.", None),
-        "lambertConformal" => {
-            ("Conic, conformal: true shapes across a mid-latitude region; set its meridian and parallels to the region.", None)
+        "mercator" => (tl!("World, conformal: the usual web map; areas grow towards the poles."), Some("3857".into())),
+        "globe" => (tl!("A 3D globe seen from space."), None),
+        "equirectangular" => (tl!("World, cylindrical: equal steps of longitude and latitude."), Some("4087".into())),
+        "miller" => (tl!("World, cylindrical: a compromise between Mercator and equal steps."), Some("54003".into())),
+        "mollweide" => (tl!("World, equal-area: true sizes, shapes bend towards the edges."), Some("54009".into())),
+        "cylindricalEqualArea" => (tl!("World, equal-area, cylindrical: true sizes, flattened near the poles."), Some("54034".into())),
+        "robinson" => (tl!("World, compromise: neither equal-area nor conformal, balanced for wall maps."), Some("54030".into())),
+        "equalEarth" => (tl!("World, equal-area: true sizes with a Robinson-like look."), Some("8857".into())),
+        "naturalEarth" => (tl!("World, compromise: rounded corners, gentle shapes near the poles."), None),
+        "winkelTripel" => (tl!("World, compromise: low overall distortion, used for world atlases."), Some("54042".into())),
+        "eckertIV" => (tl!("World, equal-area: true sizes with rounded poles."), Some("54012".into())),
+        "northPolar" => (tl!("Polar, conformal: the Arctic and the northern lands."), None),
+        "southPolar" => (tl!("Polar, conformal: Antarctica and the Southern Ocean."), Some("3031".into())),
+        "europeEqualArea" => (tl!("Regional, equal-area: the European standard for statistics."), Some("3035".into())),
+        "usaAlbers" => (tl!("Regional, equal-area: the contiguous United States."), Some("5070".into())),
+        "albers" => {
+            (tl!("Conic, equal-area: true sizes across a mid-latitude region; set its meridian and parallels to the region."), None)
         }
-        _ => ("A projected coordinate system.", epsg.clone()),
+        "lambertConformal" => {
+            (tl!("Conic, conformal: true shapes across a mid-latitude region; set its meridian and parallels to the region."), None)
+        }
+        "vn2000tm3" => (
+            tl!(
+                "Vietnam national coordinate system (VN-2000) using 3-degree Transverse Mercator with a 7-parameter Helmert shift to WGS 84."
+            ),
+            Some("5897".into()),
+        ),
+        "vn2000Utm48" => {
+            (tl!("Vietnam national coordinate system (VN-2000) UTM zone 48N (102°E–108°E, central meridian 105°E)."), Some("3405".into()))
+        }
+        "vn2000Utm49" => {
+            (tl!("Vietnam national coordinate system (VN-2000) UTM zone 49N (108°E–114°E, central meridian 111°E)."), Some("3406".into()))
+        }
+        _ => (tl!("A projected coordinate system."), epsg.clone()),
     };
     let page = page.filter(|_| !tuned);
-    ui.label(tl!(kind));
+    ui.label(kind);
     if let Ok(p) = Projector::new(&code) {
         let area = match p.domain() {
             Domain::World => tl!("Area of use: the whole world").to_string(),
@@ -1429,5 +1472,70 @@ mod tests {
         h.get_by_label("Apply").click();
         h.run_steps(3);
         assert_eq!(h.state().session.map().projection.code(), "robinson +lon_0=150");
+    }
+
+    #[test]
+    fn vn2000_in_coordinate_system_dialog() {
+        let mut app = RustGisApp::with_sample();
+        app.run("ui.dialog", json!({"name": "coordinateSystem"})).unwrap();
+        // A bare "vn2000" names no projection: it is passed on, and refused as ambiguous.
+        app.dialogs.a = "vn2000".into();
+        app.dialogs.text = typed_crs(&app.dialogs.a);
+        assert_eq!(app.dialogs.text, "vn2000");
+        let err = rustgis_engine::map::Projection::from_code(&app.dialogs.text).unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+
+        // Explicit "vn2000tm3" resolves to VN-2000 TM-3 preset
+        app.dialogs.a = "vn2000tm3".into();
+        app.dialogs.text = typed_crs(&app.dialogs.a);
+        assert_eq!(app.dialogs.text, "vn2000tm3");
+        let proj = rustgis_engine::map::Projection::from_code(&app.dialogs.text).unwrap();
+        assert_eq!(proj.label(), "VN-2000 / TM-3 (Vietnam)");
+
+        // Explicit "VN-2000 / UTM zone 48N" resolves to UTM 48N
+        let proj_utm = rustgis_engine::map::Projection::from_code("VN-2000 / UTM zone 48N").unwrap();
+        assert_eq!(proj_utm.label(), "VN-2000 / UTM zone 48N");
+
+        // A province with the vn2000: prefix, in ASCII or Vietnamese.
+        for (name, code) in [
+            ("vn2000:hanoi", "vn2000tm3"),
+            ("vn2000:Hà Nội", "vn2000tm3"),
+            ("VN2000/Đà Nẵng", "vn2000tm3 +lon_0=107.75"),
+            ("vn2000:tphcm", "vn2000tm3 +lon_0=105.75"),
+            ("vn2000:vithanh", "vn2000tm3"),
+            ("vn2000:vitri", "vn2000tm3"),
+        ] {
+            app.dialogs.a = name.into();
+            app.dialogs.text = typed_crs(&app.dialogs.a);
+            let proj_p = rustgis_engine::map::Projection::from_code(&app.dialogs.text).unwrap();
+            assert!(proj_p.label().contains("VN-2000"), "{name}");
+            assert_eq!(proj_p.code(), code, "{name}");
+        }
+        // A bare province name is not a coordinate system: words such as "hue" stay as typed,
+        // as `map.projection` reads them.
+        for name in ["hanoi", "Hà Nội", "hue", "vinh", "tphcm", "vithanh", "vitri", "vietnam"] {
+            assert_eq!(typed_crs(name), name);
+            assert!(rustgis_engine::map::Projection::from_code(name).is_err(), "{name}");
+        }
+        // A prefixed province given to the command is saved as the preset too.
+        app.run("map.projection", json!({"type": "VN2000/Đà Nẵng"})).unwrap();
+        assert_eq!(app.session.map().projection.code(), "vn2000tm3 +lon_0=107.75");
+
+        // Applying VN-2000 TM-3
+        app.run("map.projection", json!({"type": "vn2000tm3"})).unwrap();
+        assert_eq!(app.session.map().projection.code(), "vn2000tm3");
+
+        // Custom meridian for HCMC (105.75)
+        app.run("map.projection", json!({"type": "vn2000tm3 +lon_0=105.75"})).unwrap();
+        assert_eq!(app.session.map().projection.code(), "vn2000tm3 +lon_0=105.75");
+    }
+
+    #[test]
+    fn ui_degree_formatting_preserves_fractions() {
+        assert_eq!(format_degrees(105.0), "105°");
+        assert_eq!(format_degrees(107.0), "107°");
+        assert_eq!(format_degrees(105.75), "105.75°");
+        assert_eq!(format_degrees(108.5), "108.5°");
+        assert_eq!(format_degrees(104.25), "104.25°");
     }
 }
