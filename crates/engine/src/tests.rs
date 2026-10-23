@@ -1542,6 +1542,38 @@ fn label_range_placement_lock_and_convert() {
     assert!(!s.map().layer_by_name("Countries").unwrap().labels.enabled);
 }
 
+/// A lock names each label by its class's place in the list: a change to the list (a class added,
+/// moved or removed) locks the labels again on the next frame, a change within a class keeps the
+/// lock (#732).
+#[test]
+fn a_change_to_the_label_classes_locks_the_labels_again() {
+    use crate::render::View;
+    let mut s = world();
+    s.run("labels.enable", &json!({"layer": "Cities", "on": true})).unwrap();
+    s.run("labels.lock", &json!({"on": true})).unwrap();
+    let draw = |s: &mut Session| {
+        let v = View { width: 800.0, height: 600.0, pixels_per_point: 1.0, camera: s.map().camera, sky: false };
+        crate::render::render(s.map_mut(), &v).unwrap();
+    };
+    draw(&mut s);
+    assert!(s.map().label_lock.is_some());
+    s.run("labels.style", &json!({"layer": "Cities", "size": 14})).unwrap();
+    s.run("labels.class.update", &json!({"layer": "Cities", "visible": true})).unwrap();
+    assert!(s.map().label_lock.is_some(), "a change within a class keeps the lock");
+    for (id, p) in [
+        ("labels.class.add", json!({"layer": "Cities", "name": "Big"})),
+        ("labels.class.add", json!({"layer": "Cities", "name": "Small"})),
+        ("labels.class.move", json!({"layer": "Cities", "class": "Small", "to": 0})),
+        ("labels.class.remove", json!({"layer": "Cities", "class": "Big"})),
+        ("labels.class.clear", json!({"layer": "Cities"})),
+    ] {
+        s.run(id, &p).unwrap();
+        assert!(s.map().label_lock.is_none(), "{id} moves the classes: locked again");
+        draw(&mut s);
+        assert!(s.map().label_lock.is_some(), "{id}: locked on the next frame");
+    }
+}
+
 /// Label classes by command (#618): added from Default and checked before it, renamed, given
 /// a clause, moved, styled and removed; refusals change nothing, and Default stays last.
 #[test]
@@ -1646,9 +1678,12 @@ fn label_classes_convert_and_outlive_a_deleted_field() {
     let a = s.map().layer(u32::try_from(r["layer"].as_u64().unwrap()).unwrap()).unwrap();
     let classes: Vec<_> = a.labels.in_order().map(|c| (c.name.clone(), c.where_.clone(), c.field.clone(), c.size)).collect();
     assert_eq!(classes[0], ("Big's".to_string(), Some(r#""CLASS" = 'Big''s'"#.to_string()), "TEXT".to_string(), 18.0));
-    assert_eq!((classes[1].1.as_ref(), classes[1].2.as_str()), (None, "TEXT"), "Default takes the rest");
-    let picked = rustgis_data::query::select(classes[0].1.as_deref().unwrap(), &a.dataset).unwrap().len();
-    assert_eq!(picked, big, "the class's clause picks the points it labelled");
+    assert_eq!((classes[1].1.as_deref(), classes[1].2.as_str()), (Some(r#""CLASS" = 'Default'"#), "TEXT"), "Default picks its own");
+    let picked = |w: &Option<String>| rustgis_data::query::select(w.as_deref().unwrap(), &a.dataset).unwrap().len();
+    assert_eq!(picked(&classes[0].1), big, "the class's clause picks the points it labelled");
+    // Default labels the big cities too (#732): each class gives them a point.
+    assert_eq!(picked(&classes[1].1), a.dataset.features.len() - big);
+    assert!(picked(&classes[1].1) > big, "Default labels every city, the big ones among them");
     // A deleted field: the class labels with Default's field, and is kept.
     s.run("layer.select", &json!({"layer": cities})).unwrap();
     s.run("labels.field", &json!({"class": "Big's", "field": "pop_max"})).unwrap();
@@ -12048,7 +12083,7 @@ fn ogc_group_refresh_keeps_children_across_rotated_keys_and_rejects_bad_answers(
     let group = added["group"].clone();
     let ids: Vec<u32> = s.map().service_groups[0].children.iter().map(|c| c.layer).collect();
     s.run("layer.rename", &json!({"layer":ids[0], "name":"Renamed"})).unwrap();
-    s.map_mut().label_lock = Some(vec![(ids[0], 0), (ids[1], 0)]);
+    s.map_mut().label_lock = Some(vec![(ids[0], 0, 0), (ids[1], 0, 0)]);
 
     // A rotated key changes every source address but not the collections: the children stay.
     let mut q = doc("rotated-key");
