@@ -10,14 +10,21 @@
 Select a layer in Layers and open **Style › Symbology** (or the Symbology pane):
 
 - **Single Symbol**: one fill, outline and marker for every feature.
-- **Unique Values**: one colour per distinct value of a field. The Layers pane and layout legends
-  list only the classes that drawn features use (after the definition query and display filters);
+- **Unique Values**: one colour per distinct value of a field. If no field is chosen, the current
+  renderer's field is kept when available; otherwise the first available field is used, including
+  text fields. The Layers pane and layout legends list only the
+  classes that drawn features use (after the definition query and display filters);
   `<all other values>` appears only when a drawn feature falls outside the classes and its symbol
   is not fully transparent. A layout legend can leave it out with **Hide other values** (see
   [Layouts](layouts.md)).
 - **Graduated Colors**: 1 to 12 classes of a numeric field by natural breaks (Jenks), equal
-  interval or quantile.
-- **Proportional Symbols**: point size grows with a numeric field.
+  interval or quantile. If no field is chosen, the current renderer's field is kept when it is
+  numeric; otherwise the first numeric field is used. If the layer has no numeric field, or the
+  switch fails for another reason, the pane shows why and keeps the current renderer. When numeric
+  fields exist, a field picker lets you try another one; the error stays visible if a retry fails.
+  A problem no field can fix, such as a definition query that keeps no features, needs fixing
+  first. Closing the pane or selecting another layer drops the retry.
+- **Proportional Symbols**: point size grows with a numeric field, chosen as for Graduated Colors.
 
 Pick a colour scheme from the pane's swatches, listed in groups: **Perceptually Uniform** (Viridis,
 Plasma, Inferno, Magma, Cividis, Batlow and Aurora: even steps in lightness, so they read in
