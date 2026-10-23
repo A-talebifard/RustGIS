@@ -113,7 +113,7 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                     continue;
                 };
                 if let Some(g) = grid {
-                    draw_grid(&mut frame_pm, map, &view, g);
+                    draw_grid(&mut frame_pm, map, &view, g, layout.decimal_comma);
                 }
                 if let Some(other) = extent_of.and_then(frame)
                     && let Some(om) = maps.get(other.1)
@@ -165,7 +165,7 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                 if let Some(&(_, mi, cam, _, _)) = frame(*f)
                     && let Some(map) = maps.get(mi)
                 {
-                    scale_bar(&mut pm, r, map.ground_res_at(&cam), (*units, *divisions, *style), ppp);
+                    scale_bar(&mut pm, r, map.ground_res_at(&cam), (*units, *divisions, *style), ppp, layout.decimal_comma);
                 }
             }
             ElementKind::Legend { frame: f, title, all_classes, hide_other, exclude } => {
@@ -187,7 +187,14 @@ pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> O
                         &mut pm,
                         r,
                         &sc,
-                        &Bar { title, orientation: *orientation, ticks: *ticks, side: *tick_side, reverse: *reverse },
+                        &Bar {
+                            title,
+                            orientation: *orientation,
+                            ticks: *ticks,
+                            side: *tick_side,
+                            reverse: *reverse,
+                            comma: layout.decimal_comma,
+                        },
                         ppp,
                     ),
                     None => placeholder(&mut pm, r, "Colorbar", ppp),
@@ -327,6 +334,16 @@ fn finish_frame_map(mut img: crate::Rendered, ppp: f64) -> Pixmap {
 
 /// Expands layout text tokens: the page ones here, the map ones from the first frame.
 pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, rustgis_map::Camera)>) -> String {
+    // The frame's scale, worked out once for both its forms below.
+    let scale = frame.map(|(m, cam)| m.ground_res_at(&cam) / rustgis_map::layout::PAPER_M_PER_PT);
+    // A layout with a decimal comma prints its scale with points between thousands: put in first,
+    // so a page or layout name holding "{scale}" isn't read as the token.
+    let t = match scale {
+        Some(scale) if layout.decimal_comma => {
+            t.replace("{scale}", &format!("1:{}", decimal(rustgis_map::graphics::thousands(scale), true)))
+        }
+        _ => t.to_string(),
+    };
     let t = t
         .replace("{page}", &info.page.max(1).to_string())
         .replace("{pages}", &info.pages.max(1).to_string())
@@ -336,7 +353,7 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
     let v = match frame {
         Some((m, cam)) => rustgis_map::graphics::TokenValues {
             map: m.name.clone(),
-            scale: m.ground_res_at(&cam) / rustgis_map::layout::PAPER_M_PER_PT,
+            scale: scale.unwrap_or(0.0),
             crs: m.projection.label(),
             layers: m.layers.iter().filter(|l| !l.graphics).count(),
             center: m.to_lonlat(cam.center).unwrap_or_default(),
@@ -352,6 +369,21 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
         },
     };
     rustgis_map::graphics::expand(&t, &v)
+}
+
+/// A number as printed with a decimal comma when `comma` (`0.05` to `0,05`, `6,300,000` to
+/// `6.300.000`): its points and commas swapped.
+fn decimal(s: String, comma: bool) -> String {
+    if !comma {
+        return s;
+    }
+    s.chars()
+        .map(|c| match c {
+            '.' => ',',
+            ',' => '.',
+            c => c,
+        })
+        .collect()
 }
 
 fn shape_path(shape: &FrameShape, r: Rect) -> Option<tiny_skia::Path> {
@@ -464,7 +496,7 @@ enum Edge {
 
 /// A graticule over a frame: lines across it, ticks along its edges or both, labelled at the
 /// edges the grid names.
-fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &Grid) {
+fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &Grid, comma: bool) {
     let ppp = view.pixels_per_point as f32;
     let (w, h) = (view.width, view.height);
     let mut ext = Extent::EMPTY;
@@ -530,7 +562,7 @@ fn draw_grid(pm: &mut Pixmap, map: &Map, view: &View, g: &Grid) {
                     Edge::Right => g.edges.right,
                 };
                 if g.labels && shown {
-                    labels.push((edge, at, grid_label(g, v, lon, step)));
+                    labels.push((edge, at, decimal(grid_label(g, v, lon, step), comma)));
                 }
             }
         }
@@ -704,7 +736,7 @@ fn scale_number(v: f64, step: f64) -> String {
 
 /// A scale bar filling most of the element's width, in `units`, with `divisions` labelled steps.
 /// `ground_per_pt` is ground metres per logical point of paper.
-fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, bar: (ScaleUnits, usize, ScaleBarStyle), ppp: f64) {
+fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, bar: (ScaleUnits, usize, ScaleBarStyle), ppp: f64, comma: bool) {
     let (units, divisions, style) = bar;
     if !(ground_per_pt.is_finite() && ground_per_pt > 0.0) {
         return;
@@ -770,7 +802,7 @@ fn scale_bar(pm: &mut Pixmap, r: Rect, ground_per_pt: f64, bar: (ScaleUnits, usi
     let gap = 3.0 * ppp as f32;
     let labels: Vec<(f32, String)> = (0..=divisions)
         .map(|i| {
-            let v = scale_number(total * i as f64 / divisions as f64, total / divisions as f64);
+            let v = decimal(scale_number(total * i as f64 / divisions as f64, total / divisions as f64), comma);
             (x0 + seg * i as f32, if i == divisions { format!("{v} {abbr}") } else { v })
         })
         .collect();
@@ -984,6 +1016,54 @@ pub fn frame_render_scale(map: &Map, center: Coord, scale: f64) -> f64 {
     map.ground_res_at(&cam) / rustgis_geom::PIXEL_M
 }
 
+/// Where a frame showing `map` at 1:`scale` draws its layers: a grid of about `cells` cells across
+/// the frame's longer side, row by row from the top, each `true` where a layer (or its labels)
+/// drew. The basemap is left out, so the frame's background isn't counted. For keeping a
+/// layout's surrounds off what its map shows. `None` when the frame can't be drawn.
+///
+/// The map itself is drawn, not a copy of it (every layer's features): its basemap, web tiles
+/// (a background, like the basemap) and graticule are set aside for the drawing and put back,
+/// however it ends, as is a label lock waiting to be filled, which the coarse drawing would
+/// otherwise fill.
+pub fn frame_coverage(map: &mut Map, center: Coord, scale: f64, w_mm: f64, h_mm: f64, cells: u32) -> Option<(u32, u32, Vec<bool>)> {
+    if !(w_mm > 0.0 && h_mm > 0.0) {
+        return None;
+    }
+    let (w, h) = (w_mm * PT_PER_MM, h_mm * PT_PER_MM);
+    let ppp = f64::from(cells.clamp(8, 512)) / w.max(h);
+    let view = View { width: w, height: h, pixels_per_point: ppp, camera: frame_camera(map, center, scale, 0.0, 0.0), sky: false };
+    // Put back when this ends, a panic in the drawing included.
+    struct Aside<'a> {
+        basemap: rustgis_map::Basemap,
+        tiles: Vec<rustgis_map::TileLayer>,
+        graticule: bool,
+        lock: Option<Vec<rustgis_map::LabelKey>>,
+        map: &'a mut Map,
+    }
+    impl Drop for Aside<'_> {
+        fn drop(&mut self) {
+            self.map.basemap = self.basemap;
+            self.map.tiles = std::mem::take(&mut self.tiles);
+            self.map.graticule = self.graticule;
+            self.map.label_lock = self.lock.take();
+        }
+    }
+    let aside = Aside {
+        basemap: std::mem::replace(&mut map.basemap, rustgis_map::Basemap::Blank),
+        tiles: std::mem::take(&mut map.tiles),
+        graticule: std::mem::replace(&mut map.graticule, false),
+        lock: map.label_lock.take(),
+        map,
+    };
+    let pm = crate::render(&mut *aside.map, &view)?.pixmap;
+    drop(aside);
+    let (gw, gh) = (pm.width(), pm.height());
+    // Anything not the blank basemap's paper, pure opaque white (the graticule set aside too): a
+    // pale or translucent fill counts (only a fill of that very white, invisible on it, doesn't).
+    let drawn = pm.pixels().iter().map(|p| p.alpha() > 0 && (p.red(), p.green(), p.blue(), p.alpha()) != (255, 255, 255, 255)).collect();
+    Some((gw, gh, drawn))
+}
+
 fn swatch(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, gt: GeometryType, s: &rustgis_map::Symbol, ppp: f32) {
     let cy = y + h / 2.0;
     match gt {
@@ -1038,6 +1118,8 @@ struct Bar<'a> {
     ticks: usize,
     side: TickSide,
     reverse: bool,
+    /// Labels with a decimal comma ([`Layout::decimal_comma`]).
+    comma: bool,
 }
 
 /// `n` values from `lo` to `hi`, the ends included, with the fewest decimals that keep each within
@@ -1100,6 +1182,7 @@ fn colorbar(pm: &mut Pixmap, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
     if blocks.is_empty() || r.width() < 2.0 || bottom - top < 2.0 {
         return;
     }
+    let labels: Vec<(f32, String)> = labels.into_iter().map(|(at, s)| (at, decimal(s, bar.comma))).collect();
     let tick = 2.5 * ppp;
     let gap = 1.5 * ppp;
     let vertical = bar.orientation == Orientation::Vertical;
@@ -1953,7 +2036,7 @@ mod tests {
             let mut pm = Pixmap::new(300, 60).unwrap();
             pm.fill(tiny_skia::Color::WHITE);
             // 100 m of ground per point: about 25 km across the bar.
-            scale_bar(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap(), 100.0, bar, 1.0);
+            scale_bar(&mut pm, Rect::from_xywh(0.0, 0.0, 300.0, 60.0).unwrap(), 100.0, bar, 1.0, false);
             pm
         };
         // Dark runs along the bar's middle row: one per dark division of an alternating bar.
@@ -1995,5 +2078,26 @@ mod tests {
         assert_eq!(scale_number(20.0 / 3.0, 10.0 / 3.0), "6.7");
         assert_eq!(scale_number(200.0 / 3.0, 100.0 / 3.0), "67");
         assert_eq!(scale_number(0.01 / 3.0, 0.01 / 3.0), "0.0033");
+    }
+
+    /// A layout with a decimal comma swaps the marks of the numbers it prints, `{scale}` included,
+    /// and leaves other text alone.
+    #[test]
+    fn a_decimal_comma_swaps_the_marks() {
+        assert_eq!(decimal("0.05".into(), true), "0,05");
+        assert_eq!(decimal("6,300,000".into(), true), "6.300.000");
+        assert_eq!(decimal("0.05".into(), false), "0.05");
+        let map = Map::new("m");
+        let cam = frame_camera(&map, Coord::new(0.0, 0.0), 6_300_000.0, 0.0, 0.0);
+        let info = PageInfo { page: 1, pages: 1, page_name: String::new() };
+        let mut layout = Layout::new("L", 100.0, 100.0);
+        let point = expand("Scale {scale}, page {page}.", &layout, &info, Some((&map, cam)));
+        layout.decimal_comma = true;
+        let comma = expand("Scale {scale}, page {page}.", &layout, &info, Some((&map, cam)));
+        // "Scale 1:6,300,000, page 1." and "Scale 1:6.300.000, page 1.": the scale's marks swap, the
+        // text's comma stays.
+        let scale = point.strip_prefix("Scale ").and_then(|t| t.strip_suffix(", page 1.")).unwrap_or_else(|| panic!("{point}"));
+        assert!(scale.starts_with("1:") && scale.contains(','), "{point}");
+        assert_eq!(comma, format!("Scale {}, page 1.", scale.replace(',', ".")));
     }
 }

@@ -2479,9 +2479,12 @@ fn publication_layouts_fit_their_pages() {
         }
         let frame = l.elements.iter().find(|e| e.kind.code() == "mapFrame").unwrap();
         let ElementKind::MapFrame { scale, grid: Some(grid), .. } = &frame.kind else { panic!("{profile}: no grid") };
-        // The legend stops short of the scale bar's box, however narrow the frame.
+        // The legend stops short of the scale bar's box, whichever corners they take, however
+        // narrow the frame.
         let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap();
-        assert!(named("Legend Box").x + named("Legend Box").w <= named("Scale Box").x, "{profile}: the legend reaches the scale bar");
+        let (a, b) = (named("Legend Box"), named("Scale Box"));
+        let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+        assert!(apart, "{profile}: the legend reaches the scale bar");
         // A round scale, two significant figures, at which the extent still fits.
         let unit = 10f64.powf(scale.log10().floor() - 1.0);
         assert!(((scale / unit) - (scale / unit).round()).abs() < 1e-6, "{profile}: 1:{scale}");
@@ -2516,7 +2519,10 @@ fn publication_layouts_fit_their_pages() {
             let reference = text("Reference").unwrap();
             assert!(reference.contains("Web Mercator") && reference.contains("WGS 84") && reference.contains("2°"), "{reference}");
             assert!(text("Author").unwrap().contains("{date}"), "the date stays a token the layout fills");
-            assert!(r["warnings"].as_array().unwrap().is_empty(), "{profile}: {r}");
+            // Nothing said but, over the sample world's land, the surrounds sharing its one corner
+            // of sea (placement has its own test).
+            let said: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+            assert!(said.len() <= 1 && said.iter().all(|w| w.contains("on what the map shows")), "{profile}: {r}");
         } else {
             assert!(text("Title").is_none() && text("Sources").is_none(), "{profile}: a figure's texts are its caption's");
             assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("caption")), "{r}");
@@ -2605,6 +2611,13 @@ fn publication_layouts_fit_their_pages() {
     assert_eq!(datum_of("+proj=robin +ellps=WGS84").as_deref(), Some("WGS 84"));
     assert_eq!(datum_of("+proj=eqearth +R=6371008.8").as_deref(), Some("a sphere"));
     assert_eq!(datum_of("+proj=moll"), None);
+    // A UTM zone's code is named by its zone and datum, not its ellipsoid.
+    s.run("map.projection", &json!({"type": "EPSG:31983"})).unwrap();
+    s.run("layout.publication", &json!({"extent": [-46, -11, -40, -2.7]})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let ElementKind::Text { text, .. } = &l.elements.iter().find(|e| e.name == "Reference").unwrap().kind else { panic!() };
+    assert!(text.contains("Projection: UTM zone 23S") && text.contains("Datum: SIRGAS 2000"), "{text}");
+    s.project.layouts.pop();
     // A preset on NAD83 says so, though its name holds no datum.
     s.run("map.projection", &json!({"type": "usaAlbers"})).unwrap();
     s.run("layout.publication", &json!({"extent": [-100, 35, -90, 45]})).unwrap();
@@ -2659,10 +2672,20 @@ fn publication_layouts_locate_their_area() {
     let (frame, locator) = (named("Map Frame"), named("Locator"));
     let ElementKind::MapFrame { map, shape, extent_of, scale, .. } = &locator.kind else { panic!() };
     assert_eq!((map.as_str(), shape, *extent_of), (globe.as_str(), &FrameShape::Circle, Some(frame.id)));
-    // Inside the map frame at its top left, above the legend.
-    assert!(locator.x > frame.x && locator.y > frame.y && locator.x + locator.w < frame.x + frame.w / 2.0);
+    // Inside the map frame (in a corner of its own: see publication_surrounds_keep_off_the_data),
+    // clear of the legend.
+    assert!(
+        locator.x > frame.x
+            && locator.y > frame.y
+            && locator.x + locator.w < frame.x + frame.w
+            && locator.y + locator.h < frame.y + frame.h
+    );
     let legend = named("Legend Box");
-    assert!(legend.y >= locator.y + locator.h, "the legend stops short of the locator");
+    let apart = legend.x + legend.w <= locator.x
+        || locator.x + locator.w <= legend.x
+        || legend.y + legend.h <= locator.y
+        || locator.y + locator.h <= legend.y;
+    assert!(apart, "the legend stops short of the locator");
     // The globe nearly fills its frame: drawn, its ink spans most of the frame's width.
     assert!(*scale > 1e7, "1:{scale}");
     let png = dir.join("globe.png");
@@ -2773,9 +2796,8 @@ fn publication_layouts_locate_their_area() {
     assert_eq!(rings("island"), [5]);
     assert!(rings("").iter().all(|n| *n >= 4));
     // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
-    // takes: the legend is never drawn over the locator, and once there's no room under it, it is
-    // left out, said.
-    let mut left_out = false;
+    // takes: the legend is never drawn over the locator, whichever corners they take (the search
+    // keeps them apart), and if the locator leaves it no room it is left out, said.
     for n in 1..80 {
         let sources: Vec<String> = (0..n).map(|i| format!("Source {i}: a line long enough to take a line of its own")).collect();
         let Ok(r) = s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": piaui, "sources": sources})) else { break };
@@ -2783,16 +2805,148 @@ fn publication_layouts_locate_their_area() {
         let named = |name: &str| l.elements.iter().find(|e| e.name == name);
         let locator = named("Locator").unwrap();
         match named("Legend Box") {
-            Some(b) => assert!(b.y >= locator.y + locator.h - 1e-6, "{n} lines: the legend over the locator"),
+            Some(b) => {
+                let apart = b.x >= locator.x + locator.w - 1e-6
+                    || locator.x >= b.x + b.w - 1e-6
+                    || b.y >= locator.y + locator.h - 1e-6
+                    || locator.y >= b.y + b.h - 1e-6;
+                assert!(apart, "{n} lines: the legend over the locator");
+            }
             None => {
-                let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap_or("").contains("no room below the locator"));
+                let said = r["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.as_str().unwrap_or("").contains("the frame leaves the legend no room beside the locator"));
                 assert!(said, "{n} lines: {r}");
-                left_out = true;
-                break;
             }
         }
     }
-    assert!(left_out, "no frame got too small for a legend under the locator");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publication layout's surrounds keep off the map's data (#682, part 3): with a polygon filling
+/// the bottom left of the frame, the legend leaves that corner and the smallest surround, the
+/// north arrow, takes it; with data everywhere, each surround says it covers some; with none, they
+/// stay in their own corners. `"decimal": ","` gives the layout a decimal comma, which
+/// `layout.page` also sets.
+#[test]
+fn publication_surrounds_keep_off_the_data() {
+    let dir = std::env::temp_dir().join(format!("rustgis-placement-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let square = |name: &str, (w, so, e, n): (f64, f64, f64, f64)| {
+        let path = dir.join(format!("{name}.geojson"));
+        let ring = format!("[[{w},{so}],[{e},{so}],[{e},{n}],[{w},{n}],[{w},{so}]]");
+        std::fs::write(
+            &path,
+            format!(r#"{{"type": "FeatureCollection", "features": [{{"type": "Feature", "properties": {{"name": "{name}"}}, "geometry": {{"type": "Polygon", "coordinates": [{ring}]}}}}]}}"#),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let corner_of = |s: &Session, name: &str| {
+        let l = s.project.layouts.last().unwrap();
+        let frame = l.elements.iter().find(|e| e.name == "Map Frame").unwrap();
+        let e = l.elements.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        let (right, low) = (e.x + e.w / 2.0 > frame.x + frame.w / 2.0, e.y + e.h / 2.0 > frame.y + frame.h / 2.0);
+        match (low, right) {
+            (false, false) => "top left",
+            (false, true) => "top right",
+            (true, false) => "bottom left",
+            (true, true) => "bottom right",
+        }
+    };
+    let extent = json!([0, 0, 10, 10]);
+    // No data in any corner: each in its own.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("middle", (4.0, 4.0, 6.0, 6.0))})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    let corners: Vec<_> = ["Locator", "North Arrow", "Legend Box", "Scale Box"].iter().map(|n| corner_of(&s, n)).collect();
+    assert_eq!(corners, ["top left", "top right", "bottom left", "bottom right"], "{r}");
+    assert!(r["warnings"].as_array().unwrap().is_empty(), "{r}");
+    // A polygon filling the bottom left: the legend leaves it, the arrow (smallest) takes it.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("corner", (-20.0, -20.0, 5.0, 5.0))})).unwrap();
+    // The coverage is drawn on the map itself, its basemap set aside meanwhile and put back.
+    // Web tiles, a background like the basemap, are set aside too: they don't make every corner
+    // look covered (a closed port, never asked).
+    s.map_mut().basemap = rustgis_map::Basemap::Ocean;
+    s.map_mut().tiles.push(rustgis_map::TileLayer::new("Streets", rustgis_map::TileKind::Raster, "http://127.0.0.1:9/{z}/{x}/{y}.png"));
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    assert!(s.map().basemap == rustgis_map::Basemap::Ocean && s.map().label_lock.is_none() && s.map().tiles.len() == 1);
+    assert_ne!(corner_of(&s, "Legend Box"), "bottom left", "{r}");
+    s.map_mut().tiles.clear();
+    assert_eq!(corner_of(&s, "North Arrow"), "bottom left", "{r}");
+    // A pale fill with no outline counts as data too: the legend leaves it the same way.
+    let mut pale = Session::new(Project::default());
+    pale.run("layer.addData", &json!({"path": square("pale", (-20.0, -20.0, 5.0, 5.0))})).unwrap();
+    pale.run("layer.color", &json!({"layer": "pale", "color": "#FAFAF5"})).unwrap();
+    pale.run("layer.outline", &json!({"layer": "pale", "color": "#00000000", "width": 0})).unwrap();
+    let rp = pale.run("layout.publication", &json!({"extent": extent, "author": ""})).unwrap();
+    assert_ne!(corner_of(&pale, "Legend Box"), "bottom left", "{rp}");
+    // Four surrounds, three free corners: the arrow says it covers data a freer corner was free of.
+    let said = r["warnings"].to_string();
+    assert!(said.contains("the north arrow sits on what the map shows"), "{said}");
+    s.run("layout.export", &json!({"path": dir.join("corner.png").display().to_string(), "dpi": 72})).unwrap();
+    // Data everywhere (a context layer filling the frame): nowhere better, so nothing said and each
+    // in its own corner.
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": square("all", (-30.0, -30.0, 40.0, 40.0))})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": extent, "author": "", "decimal": ","})).unwrap();
+    assert!(!r["warnings"].to_string().contains("on what the map shows"), "{r}");
+    assert_eq!(corner_of(&s, "Legend Box"), "bottom left");
+    // A decimal comma, set by the command and by layout.page; anything else refused.
+    assert!(s.project.layouts.last().unwrap().decimal_comma);
+    let r = s.run("layout.page", &json!({"decimal": "."})).unwrap();
+    assert_eq!(r["decimal"], ".");
+    assert!(!s.project.layouts.last().unwrap().decimal_comma);
+    for p in [json!({"decimal": ";"}), json!({"decimal": 1})] {
+        assert!(s.run("layout.page", &p).unwrap_err().contains("decimal is"), "{p}");
+        assert!(s.run("layout.publication", &json!({"extent": extent, "decimal": p["decimal"]})).unwrap_err().contains("decimal is"));
+    }
+    s.run("layout.export", &json!({"path": dir.join("comma.png").display().to_string(), "dpi": 72})).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publication layout keys a raster theme with a colorbar: the topmost visible raster drawn on a
+/// ramp gets one at the bottom of the legend's box; a map of vectors only gets none.
+#[test]
+fn a_publication_layouts_raster_gets_a_colorbar() {
+    use rustgis_map::layout::ElementKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-colorbar-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tif = dir.join("ramp.tif");
+    std::fs::write(&tif, rustgis_data::raster::cog::example(256, 128)).unwrap();
+    let mut s = Session::new(Project::default());
+    s.run("layer.addData", &json!({"path": tif.display().to_string()})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": [10, 45, 11, 46], "author": "", "locator": "none"})).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n);
+    let (bar, then) = (named("Colorbar").unwrap_or_else(|| panic!("no colorbar: {r}")), named("Legend Box").unwrap());
+    let ElementKind::Colorbar { layer, title, .. } = &bar.kind else { panic!() };
+    assert_eq!((layer.as_deref(), title.as_str()), (Some("ramp"), "ramp"));
+    assert!(
+        bar.x >= then.x && bar.x + bar.w <= then.x + then.w + 1e-9 && bar.y + bar.h <= then.y + then.h + 1e-9,
+        "inside the legend's box"
+    );
+    s.run("layout.export", &json!({"path": dir.join("colorbar.png").display().to_string(), "dpi": 72})).unwrap();
+    // Smaller boxes (figures, a locator taking room): the colorbar stays wholly inside its box, never
+    // above its top, and a box too small for it says so, not that legend rows were cut.
+    for profile in ["figure-1col", "thesis-half", "a4-landscape"] {
+        let r = s.run("layout.publication", &json!({"extent": [10, 45, 11, 46], "profile": profile, "locator": "globe"})).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        let named = |n: &str| l.elements.iter().find(|e| e.name == n);
+        let (Some(bar), Some(then)) = (named("Colorbar"), named("Legend Box")) else { continue };
+        let inside = bar.x >= then.x - 1e-9
+            && bar.y >= then.y - 1e-9
+            && bar.x + bar.w <= then.x + then.w + 1e-9
+            && bar.y + bar.h <= then.y + then.h + 1e-9;
+        assert!(inside, "{profile}: the colorbar outside its box: {r}");
+    }
+    // Vectors only: no colorbar.
+    let mut s = world();
+    s.run("layout.publication", &json!({"extent": [10, 45, 11, 46]})).unwrap();
+    assert!(s.project.layouts.last().unwrap().elements.iter().all(|e| e.name != "Colorbar"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
