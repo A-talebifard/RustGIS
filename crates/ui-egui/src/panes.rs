@@ -10,7 +10,7 @@ use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::{Normalizer, RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{
     ClassRef, ClassStyle, LineCap, LineJoin, LineStroke, MAX_LABEL, MAX_STROKE_OFFSET, MAX_STROKE_WIDTH, MAX_STROKES, MAX_UNIQUE,
-    normalize_label,
+    OTHER_VALUES, normalize_label,
 };
 use rustgis_engine::map::tiles::{TileKind, TileLayer};
 use rustgis_engine::map::{
@@ -3785,15 +3785,62 @@ fn stroke_json(st: &LineStroke) -> Value {
     })
 }
 
-fn set_strokes(app: &mut RustGisApp, strokes: &[LineStroke]) {
-    let _ = app.run("layer.lineStrokes", json!({"strokes": strokes.iter().map(stroke_json).collect::<Vec<_>>()}));
+/// Sets the layer's stacked strokes, or `class`'s own.
+fn set_strokes(app: &mut RustGisApp, class: Option<&ClassRef>, strokes: &[LineStroke]) {
+    let mut p = json!({"strokes": strokes.iter().map(stroke_json).collect::<Vec<_>>()});
+    match class {
+        Some(ClassRef::Value(v)) => p["value"] = json!(v),
+        Some(ClassRef::Index(i)) => p["index"] = json!(i),
+        Some(ClassRef::Other) => p["other"] = json!(true),
+        None => {}
+    }
+    let _ = app.run("layer.lineStrokes", p);
+}
+
+/// The classes a line layer's strokes can be set for, with their legend labels and symbols.
+fn stroke_classes(r: &Renderer) -> Vec<(ClassRef, String, Symbol)> {
+    match r {
+        Renderer::Unique { classes, other, class_labels, other_label, .. } => {
+            // A value listed twice is drawn with its first class, as the legend shows it.
+            let mut seen = std::collections::HashSet::new();
+            classes
+                .iter()
+                .filter(|(k, _)| seen.insert(k.as_str()))
+                .map(|(k, s)| (ClassRef::Value(k.clone()), class_labels.get(k).cloned().unwrap_or_else(|| k.clone()), *s))
+                .chain(std::iter::once((ClassRef::Other, other_label.clone().unwrap_or_else(|| tl!(OTHER_VALUES).to_string()), *other)))
+                .collect()
+        }
+        Renderer::Graduated { symbols, .. } => {
+            let legend = r.legend();
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (ClassRef::Index(i), legend.get(i).map(|e| e.label.clone()).unwrap_or_else(|| i.to_string()), *s))
+                .collect()
+        }
+        Renderer::Single(_) | Renderer::Proportional { .. } => Vec::new(),
+    }
 }
 
 /// The Strokes section of a line layer's symbology: strokes stacked in one symbol, each with
-/// its own colour, width, sideways offset, cap and join. Listed top first, as they are seen.
+/// its own colour, width, sideways offset, cap and join. Listed top first, as they are seen. A
+/// layer with classes can stack strokes for one class of its own, picked at the top.
 fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::map::Layer, t: &Tokens) {
-    let base = l.renderer.base_symbol();
-    let strokes = l.line_strokes.clone();
+    let classes = stroke_classes(&l.renderer);
+    let picked_id = egui::Id::new(("stroke_class", l.id));
+    // The class being edited, while the renderer still has it; `None` is the layer's own strokes.
+    let picked: Option<ClassRef> =
+        ui.data(|d| d.get_temp::<Option<ClassRef>>(picked_id)).flatten().filter(|c| classes.iter().any(|(k, ..)| k == c));
+    let class = picked.as_ref();
+    let base = class.and_then(|c| classes.iter().find(|(k, ..)| k == c)).map_or_else(|| l.renderer.base_symbol(), |(.., s)| *s);
+    let own = class.and_then(|c| l.renderer.class_strokes(c).ok()).map(<[LineStroke]>::to_vec);
+    // What the class draws: its own strokes, else the layer's.
+    let strokes = match &own {
+        Some(v) if !v.is_empty() => v.clone(),
+        Some(_) | None => l.line_strokes.clone(),
+    };
+    // A class drawn with the layer's strokes edits them as a copy of its own.
+    let borrowed = own.as_ref().is_some_and(Vec::is_empty);
     egui::Frame::NONE.fill(t.pane_header).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -3804,10 +3851,32 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     let mut next = strokes.clone();
                     // The first stroke stands for the symbol's own; later ones copy the top one.
                     next.push(strokes.last().copied().unwrap_or_default());
-                    set_strokes(app, &next);
+                    set_strokes(app, class, &next);
                 }
             });
         });
+        if !classes.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Strokes for")).size(11.5).color(t.text_dim));
+                let name = |c: Option<&ClassRef>| match c.and_then(|c| classes.iter().find(|(k, ..)| k == c)) {
+                    Some((_, label, _)) => label.clone(),
+                    None => tl!("All classes").to_string(),
+                };
+                egui::ComboBox::from_id_salt(("stroke_class_pick", l.id)).selected_text(name(class)).show_ui(ui, |ui| {
+                    if ui.selectable_label(class.is_none(), tl!("All classes")).on_hover_text(tl!("The layer's strokes")).clicked() {
+                        ui.data_mut(|d| d.insert_temp::<Option<ClassRef>>(picked_id, None));
+                    }
+                    for (k, label, _) in &classes {
+                        // A class with strokes of its own is marked.
+                        let has_own = l.renderer.class_strokes(k).is_ok_and(|s| !s.is_empty());
+                        let text = if has_own { format!("{label} •") } else { label.clone() };
+                        if ui.selectable_label(class == Some(k), text).clicked() {
+                            ui.data_mut(|d| d.insert_temp(picked_id, Some(k.clone())));
+                        }
+                    }
+                });
+            });
+        }
         // The composed symbol along a line drawn left to right: a positive offset shows below it.
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
         ui.painter().rect_filled(r, CornerRadius::same(4), t.ribbon);
@@ -3833,6 +3902,13 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
         ui.painter().line_segment([pos2(ax - 10.0, ay), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
         ui.painter().line_segment([pos2(ax - 3.0, ay - 3.0), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
         ui.painter().line_segment([pos2(ax - 3.0, ay + 3.0), pos2(ax, ay)], Stroke::new(1.0, t.text_dim));
+        if borrowed {
+            ui.label(
+                egui::RichText::new(tl!("This class is drawn with the layer's strokes. Changing them here gives it its own."))
+                    .size(11.5)
+                    .color(t.text_dim),
+            );
+        }
         if strokes.is_empty() {
             ui.label(
                 egui::RichText::new(tl!("One stroke, from the symbol. Add strokes for casings, parallel lines and offsets."))
@@ -3853,17 +3929,17 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                     if crate::widgets::icon_button(ui, "close", tl!("Remove")).clicked() {
                         let mut next = strokes.clone();
                         next.remove(i);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                     if ui.add_enabled(i > 0, egui::Button::new("↓").small()).on_hover_text(tl!("Move down")).clicked() {
                         let mut next = strokes.clone();
                         next.swap(i, i - 1);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                     if ui.add_enabled(i + 1 < n, egui::Button::new("↑").small()).on_hover_text(tl!("Move up")).clicked() {
                         let mut next = strokes.clone();
                         next.swap(i, i + 1);
-                        set_strokes(app, &next);
+                        set_strokes(app, class, &next);
                     }
                 });
             });
@@ -3872,7 +3948,7 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                 if let Some(slot) = next.get_mut(i) {
                     *slot = new;
                 }
-                set_strokes(app, &next);
+                set_strokes(app, class, &next);
             };
             egui::Grid::new(("stroke_grid", i)).num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
                 let (c, w) = st.resolve(&base);
@@ -3933,8 +4009,17 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
             });
         }
         ui.add_space(4.0);
-        if ui.small_button(tl!("Use a Single Stroke")).on_hover_text(tl!("Remove the strokes and draw the symbol's line alone")).clicked() {
-            set_strokes(app, &[]);
+        if class.is_some() {
+            let back = ui.add_enabled(!borrowed, egui::Button::new(tl!("Use the Layer's Strokes")).small());
+            if back.on_hover_text(tl!("Remove this class's own strokes and draw it with the layer's")).clicked() {
+                set_strokes(app, class, &[]);
+            }
+        } else if ui
+            .small_button(tl!("Use a Single Stroke"))
+            .on_hover_text(tl!("Remove the strokes and draw the symbol's line alone"))
+            .clicked()
+        {
+            set_strokes(app, None, &[]);
         }
     });
 }
@@ -4701,6 +4786,30 @@ mod tests {
             (Some("100"), Some("All"))
         );
         assert_eq!(f.values.get("output").map(String::as_str), Some("kept"), "not given");
+    }
+
+    /// The Strokes for picker lists a value listed twice once, for its first class (the one its
+    /// features draw with), then `<all other values>`.
+    #[test]
+    fn stroke_classes_list_a_repeated_value_once() {
+        let (a, b) = (
+            Symbol { stroke_width: 1.0, ..Symbol::default_for(GeometryType::Polyline, 0) },
+            Symbol { stroke_width: 2.0, ..Symbol::default_for(GeometryType::Polyline, 0) },
+        );
+        let r = Renderer::Unique {
+            field: "kind".into(),
+            classes: vec![("road".into(), a), ("rail".into(), b), ("road".into(), b)],
+            other: b,
+            ramp: Ramp::default(),
+            class_labels: Default::default(),
+            other_label: None,
+            class_strokes: Default::default(),
+            other_strokes: Vec::new(),
+        };
+        let listed = stroke_classes(&r);
+        let refs: Vec<&ClassRef> = listed.iter().map(|(c, ..)| c).collect();
+        assert_eq!(refs, [&ClassRef::Value("road".into()), &ClassRef::Value("rail".into()), &ClassRef::Other]);
+        assert_eq!(listed.first().map(|(.., s)| s.stroke_width), Some(1.0));
     }
 
     fn layer(app: &RustGisApp, name: &str) -> u32 {
