@@ -2634,6 +2634,168 @@ fn publication_layouts_fit_their_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A publication layout's locator (#682, part 2): on a sheet, by default, a globe (a new map of
+/// the vector layers on the globe, its diameter nearly the frame's) in a round frame at the map's
+/// top left, the area outlined by the map frame's extent indicator; `"inset"` the surrounding
+/// region on the map itself; `"none"`, or a figure by default, none. The legend stops short of it,
+/// and undo takes the globe's map away with the layout.
+#[test]
+fn publication_layouts_locate_their_area() {
+    use rustgis_map::layout::{ElementKind, FrameShape};
+    let dir = std::env::temp_dir().join(format!("rustgis-locator-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let piaui = json!([-46.8, -11.6, -38.5, -2.2]);
+    let maps = s.project.maps.len();
+    let main = s.map().name.clone();
+    let r = s.run("layout.publication", &json!({"extent": piaui, "title": "PIAUÍ"})).unwrap();
+    let globe = r["locator"].as_str().unwrap().to_string();
+    assert_eq!((s.project.maps.len(), globe.as_str()), (maps + 1, format!("{main} Locator").as_str()));
+    let m = s.project.maps.iter().find(|m| m.name == globe).unwrap();
+    assert!(m.projection.is_globe() && m.layers.iter().all(|l| !l.is_raster()));
+    assert_eq!(s.map().name, main, "the map in view stays the active one");
+    let l = s.project.layouts.last().unwrap();
+    let named = |n: &str| l.elements.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n}"));
+    let (frame, locator) = (named("Map Frame"), named("Locator"));
+    let ElementKind::MapFrame { map, shape, extent_of, scale, .. } = &locator.kind else { panic!() };
+    assert_eq!((map.as_str(), shape, *extent_of), (globe.as_str(), &FrameShape::Circle, Some(frame.id)));
+    // Inside the map frame at its top left, above the legend.
+    assert!(locator.x > frame.x && locator.y > frame.y && locator.x + locator.w < frame.x + frame.w / 2.0);
+    let legend = named("Legend Box");
+    assert!(legend.y >= locator.y + locator.h, "the legend stops short of the locator");
+    // The globe nearly fills its frame: drawn, its ink spans most of the frame's width.
+    assert!(*scale > 1e7, "1:{scale}");
+    let png = dir.join("globe.png");
+    s.run("layout.export", &json!({"path": png.display().to_string(), "dpi": 96})).unwrap();
+    // The surrounding region on the map itself: no new map, a coarser scale.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "locator": "inset"})).unwrap();
+    assert_eq!((s.project.maps.len(), r["locator"].as_str()), (maps + 1, Some(main.as_str())));
+    let l = s.project.layouts.last().unwrap();
+    let main_scale = r["scale"].as_f64().unwrap();
+    let inset = l.elements.iter().find(|e| e.name == "Locator").unwrap();
+    let ElementKind::MapFrame { map, shape, scale, extent_of, .. } = &inset.kind else { panic!() };
+    assert!(map == &main && shape == &FrameShape::Rectangle && *scale > main_scale * 3.0 && extent_of.is_some(), "1:{scale}");
+    s.run("layout.export", &json!({"path": dir.join("inset.png").display().to_string(), "dpi": 96})).unwrap();
+    // None asked, or a figure by default: no locator, and the legend stays, the narrowest
+    // figure (90 mm) included: only a locator takes its room.
+    for p in [json!({"extent": piaui, "locator": "none"}), json!({"extent": piaui, "profile": "figure-1col"})] {
+        let r = s.run("layout.publication", &p).unwrap();
+        let l = s.project.layouts.last().unwrap();
+        assert!(r["locator"].is_null() && l.elements.iter().all(|e| e.name != "Locator"), "{p}");
+        assert!(l.elements.iter().any(|e| e.name == "Legend Box"), "{p}: {r}");
+    }
+    let e = s.run("layout.publication", &json!({"extent": piaui, "locator": "moon"})).unwrap_err();
+    assert!(e.contains("locator is"), "{e}");
+    // Undone, a globe locator's map goes with its layout.
+    let before = s.project.maps.len();
+    s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert_eq!(s.project.maps.len(), before + 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(s.project.maps.len(), before);
+    // A sheet made again after its layout was deleted replaces the locator no layout shows any
+    // more, rather than leaving it beside a new one; one still shown is kept.
+    let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
+    let first = r["locator"].as_str().unwrap().to_string();
+    s.run("layout.remove", &json!({"name": "Again"})).unwrap();
+    // Made anew, not kept: a polygon layer hidden meanwhile is gone from the reused map.
+    let (gone, gone_name) =
+        s.map().layers.iter().find(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon).map(|l| (l.id, l.name.clone())).unwrap();
+    let globe_has =
+        |s: &Session, name: &str| s.project.maps.iter().find(|m| m.name == first).unwrap().layers.iter().any(|l| l.name == name);
+    assert!(globe_has(&s, &gone_name));
+    s.map_mut().layer_mut(gone).unwrap().visible = false;
+    let r = s.run("layout.publication", &json!({"extent": piaui, "name": "Again"})).unwrap();
+    assert_eq!((s.project.maps.len(), r["locator"].as_str()), (before + 1, Some(first.as_str())));
+    assert!(r["warnings"].to_string().contains("which no layout showed, is replaced"), "{r}");
+    assert!(!globe_has(&s, &gone_name), "the reused map is rebuilt");
+    s.map_mut().layer_mut(gone).unwrap().visible = true;
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert!(s.project.maps.len() == before + 2 && r["locator"].as_str() != Some(first.as_str()), "{r}");
+    // A globe map made by hand under such a name (its layers labelled) is never taken for one.
+    let mut hand = rustgis_map::Map::new(format!("{main} Locator 9"));
+    hand.set_projection(rustgis_map::Projection::Globe);
+    let mut labelled = s.map().layers.iter().find(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon).unwrap().clone();
+    labelled.labels.enabled = true;
+    hand.layers.push(labelled);
+    s.project.maps.push(hand);
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    assert_ne!(r["locator"].as_str(), Some(format!("{main} Locator 9").as_str()), "{r}");
+    let kept = s.project.maps.iter().find(|m| m.name == format!("{main} Locator 9")).unwrap();
+    assert!(kept.layers.iter().all(|l| l.labels.enabled));
+    // The globe is a new map of what it draws: the polygon layers that show (a hidden one left
+    // out) on the map's basemap, without its web tiles, swipe or groups.
+    let polygon = |l: &rustgis_map::Layer| l.geometry_type() == rustgis_data::GeometryType::Polygon;
+    let hidden = s.map().layers.iter().find(|l| polygon(l)).map(|l| (l.id, l.name.clone())).unwrap();
+    s.map_mut().layer_mut(hidden.0).unwrap().visible = false;
+    s.map_mut().tiles.push(rustgis_map::TileLayer::new(
+        "Streets",
+        rustgis_map::TileKind::Raster,
+        "https://tiles.example.com/{z}/{x}/{y}.png",
+    ));
+    s.map_mut().swipe = Some((hidden.0, 0.5));
+    let shown: Vec<String> = s.map().layers.iter().filter(|l| polygon(l) && s.map().shows(l)).map(|l| l.name.clone()).collect();
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let m = s.project.maps.iter().find(|m| Some(m.name.as_str()) == r["locator"].as_str()).unwrap();
+    assert_eq!(m.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>(), shown, "not {}", hidden.1);
+    assert!(m.tiles.is_empty() && m.swipe.is_none() && m.groups.is_empty() && m.basemap == s.map().basemap);
+    assert!(m.layers.iter().all(|l| !l.labels.enabled && l.selection.is_empty()));
+    // A sketch of each layer for the small disc: every feature kept, far fewer vertices.
+    for g in &m.layers {
+        let l = s.map().layers.iter().find(|l| l.name == g.name).unwrap();
+        let vertices =
+            |l: &rustgis_map::Layer| l.dataset.features.iter().filter_map(|f| f.geometry.as_ref()).map(|g| g.coord_count()).sum::<usize>();
+        assert_eq!(g.dataset.features.len(), l.dataset.features.len());
+        assert!(vertices(g) * 2 < vertices(l), "{}: {} of {} vertices", g.name, vertices(g), vertices(l));
+    }
+    // An island far smaller than the tolerance keeps its own ring rather than collapsing; no ring
+    // on the globe has under four points.
+    let island = dir.join("island.geojson");
+    std::fs::write(
+        &island,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[-40, -5], [-39.999, -5], [-39.999, -4.999], [-40, -4.999], [-40, -5]]]}}]}"#,
+    )
+    .unwrap();
+    s.run("layer.addData", &json!({"path": island.display().to_string()})).unwrap();
+    let r = s.run("layout.publication", &json!({"extent": piaui})).unwrap();
+    let m = s.project.maps.iter().find(|m| Some(m.name.as_str()) == r["locator"].as_str()).unwrap();
+    let rings = |name: &str| -> Vec<usize> {
+        m.layers
+            .iter()
+            .filter(|l| l.name == name || name.is_empty())
+            .flat_map(|l| l.dataset.features.iter())
+            .filter_map(|f| match &f.geometry {
+                Some(rustgis_data::Geometry::Polygon(polys)) => Some(polys.iter().flatten().map(Vec::len).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    assert_eq!(rings("island"), [5]);
+    assert!(rings("").iter().all(|n| *n >= 4));
+    // Sheets with ever more source lines, so ever smaller frames, down to the smallest a sheet
+    // takes: the legend is never drawn over the locator, and once there's no room under it, it is
+    // left out, said.
+    let mut left_out = false;
+    for n in 1..80 {
+        let sources: Vec<String> = (0..n).map(|i| format!("Source {i}: a line long enough to take a line of its own")).collect();
+        let Ok(r) = s.run("layout.publication", &json!({"profile": "a4-landscape", "extent": piaui, "sources": sources})) else { break };
+        let l = s.project.layouts.last().unwrap();
+        let named = |name: &str| l.elements.iter().find(|e| e.name == name);
+        let locator = named("Locator").unwrap();
+        match named("Legend Box") {
+            Some(b) => assert!(b.y >= locator.y + locator.h - 1e-6, "{n} lines: the legend over the locator"),
+            None => {
+                let said = r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap_or("").contains("no room below the locator"));
+                assert!(said, "{n} lines: {r}");
+                left_out = true;
+                break;
+            }
+        }
+    }
+    assert!(left_out, "no frame got too small for a legend under the locator");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn layouts_compose_export_and_round_trip() {
     use base64::Engine;

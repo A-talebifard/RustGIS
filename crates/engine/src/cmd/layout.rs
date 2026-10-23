@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).params(
-            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading]} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4-portrait" (the default)|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.activate", "Open Layout", "Browser", |s, p| {
             let i = index(s, &by_name(p))?;
@@ -463,6 +463,25 @@ fn pub_box(fill: Rgba, outline: Rgba, width: f64) -> ElementKind {
     ElementKind::Rectangle { fill, outline, width }
 }
 
+/// What a publication layout locates its area on.
+#[derive(Clone, Copy, PartialEq)]
+enum Locator {
+    Globe,
+    Inset,
+    None,
+}
+
+/// The scale at which `map` on the globe, centred on `center`, draws a globe `d_mm` across in a
+/// frame: the globe's visible disc as the renderer lays it out for the frame's camera at a probe
+/// scale, its size going as one over the scale.
+fn globe_scale(map: &rustgis_map::Map, center: Coord, d_mm: f64) -> f64 {
+    const PROBE: f64 = 1e8;
+    let cam = rustgis_map::layout::frame_camera(map, center, PROBE, 0.0, 0.0);
+    let side = d_mm.max(1.0) * rustgis_map::layout::PT_PER_MM;
+    let radius = rustgis_map::globe::Globe::new(&cam, side, side).disc_radius();
+    if radius.is_finite() && radius > 0.0 { (PROBE * 2.0 * radius / side).clamp(100.0, 1e10) } else { PROBE }
+}
+
 /// `layout.publication`: a finished sheet or figure of the active map, its extent fitted at a
 /// round scale, with a graticule, legend, scale bar and north arrow; a sheet adds a frame, title,
 /// subtitle and a footer of two boxed columns (sources, cartographic reference) with a note and
@@ -510,6 +529,21 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         Some(t) => Some(t.join(" ")).filter(|t| !t.trim().is_empty()),
     };
     let headings = texts_of(p, "headings")?.unwrap_or_default();
+    let locator = match p.get("locator").filter(|v| !v.is_null()) {
+        None => {
+            if sheet {
+                Locator::Globe
+            } else {
+                Locator::None
+            }
+        }
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("globe") => Locator::Globe,
+            Some("inset") => Locator::Inset,
+            Some("none") => Locator::None,
+            _ => return Err("locator is \"globe\", \"inset\" or \"none\"".into()),
+        },
+    };
     let heading = |i: usize, or: &str| headings.get(i).cloned().unwrap_or_else(|| or.to_string());
     let (projection, datum) = projection_and_datum(s);
     let step = grid_step(&extent);
@@ -724,6 +758,123 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let (left, right, top, bottom) = (room(edges.left, true), room(edges.right, true), room(edges.top, false), room(edges.bottom, false));
     let (aw, ah) = if sheet { (8.0 * k, 12.0 * k) } else { (5.0, 7.5) };
     l.add("North Arrow", (fx + fw - right - aw, fy + top, aw, ah), ElementKind::north_arrow(frame));
+    // The locator, at the top left: a globe (a copy of the map's vector layers on the globe, its
+    // diameter nearly the frame's) or the surrounding region on the map itself, the area outlined
+    // on either by the map frame's extent indicator.
+    let side = if sheet { (0.24 * fw.min(fh)).clamp(25.0 * k, 70.0 * k) } else { (0.3 * fw.min(fh)).clamp(18.0, 45.0) };
+    let locator_map = match locator {
+        Locator::None => None,
+        Locator::Globe => {
+            let src = s.map();
+            let base = format!("{} Locator", src.name);
+            // A locator an earlier sheet made that no layout shows any more (its layout deleted)
+            // is replaced, so sheets made again and again don't leave a trail of them; one still
+            // shown is kept, and the new one numbered beside it.
+            let shown = |n: &str| {
+                s.project
+                    .layouts
+                    .iter()
+                    .flat_map(|l| &l.elements)
+                    .any(|e| matches!(&e.kind, ElementKind::MapFrame { map, .. } if map.eq_ignore_ascii_case(n)))
+            };
+            let ours = |n: &str| {
+                n.strip_prefix(base.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(' ').is_some_and(|k| k.parse::<u32>().is_ok()))
+            };
+            // And made as this command makes them: no web tiles, only unlabelled polygon layers,
+            // so a globe map made by hand under that name is left alone.
+            let made_here = |x: &rustgis_map::Map| {
+                x.tiles.is_empty() && x.layers.iter().all(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon && !l.labels.enabled)
+            };
+            let orphan = s
+                .project
+                .maps
+                .iter()
+                .position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name && made_here(x));
+            let name = match orphan.and_then(|i| s.project.maps.get(i)) {
+                Some(x) => x.name.clone(),
+                None => numbered(&base, |n| s.project.maps.iter().any(|x| x.name.eq_ignore_ascii_case(n))),
+            };
+            // A new map of what the globe draws, not a clone of the whole map (every layer's
+            // features): its basemap (the land and borders around the area), graticule and body,
+            // and the map's own polygon layers that show, unlabelled: the land at a glance, no
+            // raster or streamed layer (read again) nor points and lines cluttering a small disc.
+            // Not its web tiles (fetched and drawn over the basemap on the disc), swipe, time
+            // slider, layer groups (their hidden layers left out here), bookmarks or animation.
+            let mut m = rustgis_map::Map::new(name);
+            m.basemap = src.basemap;
+            m.graticule = src.graticule;
+            m.body = src.body.clone();
+            m.set_projection(rustgis_map::Projection::Globe);
+            let globe = globe_scale(&m, center, side * 0.92);
+            // Each polygon simplified to a tenth of a millimetre on the disc (its scale in metres),
+            // so the project keeps a sketch of the layers for it, not a second full copy of them.
+            let tolerance_m = globe * 1e-4;
+            // A polygon too small for that (an island) would collapse to a ring of under four
+            // points: it keeps its own shape, already small.
+            let sketch = |g: &rustgis_data::Geometry| {
+                let simple = rustgis_analysis::simplify_geometry(g, tolerance_m);
+                match &simple {
+                    rustgis_data::Geometry::Polygon(polys) if polys.iter().flatten().all(|ring| ring.len() >= 4) => simple,
+                    _ => g.clone(),
+                }
+            };
+            m.layers = src
+                .layers
+                .iter()
+                .filter(|l| {
+                    src.shows(l) && !l.is_raster() && l.source.is_none() && l.geometry_type() == rustgis_data::GeometryType::Polygon
+                })
+                .map(|l| {
+                    // (Sharing the rows: `Features` is copy-on-write, replaced just below.)
+                    let mut layer = l.clone();
+                    layer.dataset.features = l
+                        .dataset
+                        .features
+                        .iter()
+                        .map(|f| {
+                            let mut f = f.clone();
+                            f.geometry = f.geometry.as_ref().map(sketch);
+                            f
+                        })
+                        .collect();
+                    layer.touch_geometry();
+                    layer.selection.clear();
+                    layer.labels.enabled = false;
+                    layer
+                })
+                .collect();
+            let name = m.name.clone();
+            match orphan.and_then(|i| s.project.maps.get_mut(i)) {
+                Some(old) => {
+                    *old = m;
+                    warnings.push(format!("the map '{name}', which no layout showed, is replaced by this sheet's globe"));
+                }
+                None => s.project.maps.push(m),
+            }
+            Some((name, globe, FrameShape::Circle))
+        }
+        Locator::Inset => Some((s.map().name.clone(), round_scale(scale * fw / side * 4.0), FrameShape::Rectangle)),
+    };
+    if let Some((map, locator_scale, shape)) = &locator_map {
+        l.add(
+            "Locator",
+            (fx + left, fy + top, side, side),
+            ElementKind::MapFrame {
+                map: map.clone(),
+                center,
+                scale: *locator_scale,
+                shape: shape.clone(),
+                grid: None,
+                extent_of: Some(frame),
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            },
+        );
+    }
+    let below_locator = if locator_map.is_some() { side + e } else { 0.0 };
     // The legend lists what the frame draws: its map synced to the frame's view first, as an
     // export does, so a streamed layer has its features there. (This changes the session's map,
     // so it comes after the last refusal: nothing below fails.) While one is still reading, the
@@ -755,10 +906,20 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     // The scale bar's box, at the bottom right: the legend stops short of it (and so of the north
     // arrow above it, which is narrower), however narrow the frame.
     let (sw, sh, nh) = ((fw * 0.3).max(25.0), if sheet { 8.0 * k } else { 6.0 }, pitch(small_pt) + 0.5);
-    if ch > 0.0 {
+    // Its corner, at least 10 mm each way; under a locator, though, a corner shorter than that
+    // leaves the legend out, said, rather than drawing it over the locator.
+    const MIN_LEGEND_MM: f64 = 10.0;
+    let room_w = (fw - left - right - sw - 2.0).max(MIN_LEGEND_MM);
+    let room_h = fh - top - bottom - below_locator;
+    if ch > 0.0 && below_locator > 0.0 && room_h < MIN_LEGEND_MM {
+        warnings.push(
+            "the frame leaves the legend no room below the locator, so it is left out: give the map more room, or set \"locator\": \"none\""
+                .into(),
+        );
+    } else if ch > 0.0 {
+        let room_h = room_h.max(MIN_LEGEND_MM);
         let pad = 2.0;
-        let room_w = (fw - left - right - sw - 2.0).max(10.0);
-        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6));
+        let (lw, lh) = ((cw + 2.0 * pad).min(fw * 0.45).min(room_w), (ch + 2.0 * pad).min(fh * 0.6).min(room_h));
         if cw + 2.0 * pad > lw || ch + 2.0 * pad > lh {
             warnings.push("the legend lists more than fits its corner: its last rows or the ends of long labels are left out".into());
         }
@@ -782,7 +943,10 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
-    Ok(json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "elements": elements, "warnings": warnings}))
+    let locator = locator_map.map(|(map, ..)| map);
+    Ok(
+        json!({"layout": i, "name": name, "page": [w, h], "scale": scale, "grid": step, "locator": locator, "elements": elements, "warnings": warnings}),
+    )
 }
 
 fn page(s: &mut Session, p: &Value) -> CmdResult {
