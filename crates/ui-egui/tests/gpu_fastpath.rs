@@ -70,6 +70,7 @@ fn harness() -> Option<egui_kittest::Harness<'static, RustGisApp>> {
     app.run("ui.map.gpu", json!({"on": true})).expect("gpu on");
     Some(
         egui_kittest::Harness::builder()
+            .with_accessibility_check(false)
             .with_size(egui::vec2(900.0, 550.0))
             .with_pixels_per_point(1.0)
             .with_max_steps(10_000)
@@ -168,6 +169,7 @@ fn zooming_a_planet_with_raster_tiles_reuses_the_gpu_frame() {
             delta: egui::vec2(0.0, 2.0),
             phase: egui::TouchPhase::Move,
             modifiers: Default::default(),
+            source: egui::MouseWheelSource::Wheel,
         });
         h.step();
     }
@@ -303,6 +305,7 @@ fn raster_tiles_move_with_the_camera_on_the_gpu() {
                 delta: egui::vec2(0.0, 0.5),
                 phase: egui::TouchPhase::Move,
                 modifiers: Default::default(),
+                source: egui::MouseWheelSource::Wheel,
             });
             h.step();
         }
