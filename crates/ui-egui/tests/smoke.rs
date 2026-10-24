@@ -3215,3 +3215,23 @@ fn line_strokes_editor_edits_one_class() {
     assert_eq!(class_strokes(&h, &ClassRef::Value("1".into())), 1);
     assert!(h.state().session.map().layer_by_name("Rivers").unwrap().line_strokes.is_empty(), "the layer's own are untouched");
 }
+
+/// Out-of-range band input shows the raster's range and keeps calculation disabled.
+#[test]
+fn zonal_statistics_shows_available_band_range() {
+    use egui_kittest::kittest::NodeT;
+    use rustgis_engine::data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let mut h = harness();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 1.0, pixel_width: 1.0, pixel_height: -1.0 };
+    let raster = Raster::new("dem", 1, 1, vec![vec![1.0]], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+    h.state_mut().session.map_mut().add_raster("dem", rustgis_engine::map::RasterLayer::from_path(raster, "dem.tif"));
+    h.state_mut().run("ui.pane.workflows", json!(null)).unwrap();
+    h.state_mut().workflow.section = "zonalStats";
+    h.state_mut().workflow.layer = "dem".into();
+    h.state_mut().workflow.layer2 = "Countries".into();
+    h.state_mut().workflow.zonal_stats.bands = "2".into();
+    h.run_steps(4);
+    assert!(h.query_by_label("Raster has bands 1 to 1.").is_some());
+    assert!(h.query_by_label("Band must be a positive integer, list of bands, or 'all'.").is_some());
+    assert!(h.get_by_label("Calculate Statistics").accesskit_node().is_disabled());
+}
