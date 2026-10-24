@@ -235,6 +235,30 @@ fn command_search_workflow_collects_inputs_before_georeferencing() {
     assert_eq!(h.state().ui.right, Some(rustgis_ui_egui::RightPane::Workflows));
 }
 
+/// Clipping follows a selection until the user explicitly opts out, even after changing it.
+#[test]
+fn polygon_clip_defaults_to_selection_and_honors_opt_out() {
+    let mut h = harness();
+    h.state_mut().workflow.layer2 = "Countries".into();
+    h.state_mut().run("ui.pane.workflows", json!(null)).unwrap();
+    h.state_mut().workflow.section = "process";
+    h.state_mut().session.map_mut().layers.iter_mut().find(|l| l.name == "Countries").unwrap().selection.push(0);
+    h.run_steps(4);
+    assert_eq!(h.state().workflow.selected_only, None);
+    let total = h.state().session.map().layer_by_name("Countries").unwrap().dataset.features.len();
+    assert!(h.query_by_label(&format!("(1 of {total})")).is_some());
+    h.get_by_label("Selected only").click();
+    h.run_steps(3);
+    assert_eq!(h.state().workflow.selected_only, Some(false));
+    h.state_mut().session.map_mut().layers.iter_mut().find(|l| l.name == "Countries").unwrap().selection.push(1);
+    h.run_steps(3);
+    assert_eq!(h.state().workflow.selected_only, Some(false));
+    assert!(h.query_by_label(&format!("(2 of {total})")).is_some());
+    h.get_by_label("Selected only").click();
+    h.run_steps(3);
+    assert_eq!(h.state().workflow.selected_only, Some(true));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mcp_relay_early_start_wakes_queued_request_and_updates_ui() {

@@ -537,6 +537,20 @@ rustgis-cli run --data cobertura_1985.tif --data cobertura_1986.tif --data cober
 rustgis-cli run --cmd 'cube.reduce={"url":"https://data.inpe.br/bdc/stac/v1","collection":"mod13q1-6.1","asset":"NDVI","bbox":[-44.8,-7.5,-44.3,-7.0],"start":"2001","end":"2025","cellSize":1000,"stat":"mean","by":"year","minValid":0.5,"name":"NDVI"}' --save urucui.rgis
 ```
 
+## Zonal statistics and polygon clipping
+
+Zonal Statistics uses the selected polygon features when the layer has a selection. It keeps
+original geometries and fields, and reports features with missing or rejected polygon parts.
+If any polygon part fails validation or transformation, the feature receives count 0 and null
+statistics, so results never summarize only the surviving parts. Large
+overlapping zones each require a separate pass over their raster window.
+
+For `raster.process` polygon clipping, `selectedOnly: true` requires a selection,
+`selectedOnly: false` uses every polygon, and omitting it uses the selection when present.
+The Process pane initially checks Selected only when the chosen layer has a selection, and sends
+the choice explicitly. Clipping and Zonal Statistics share
+polygon transformation rules so a failed hole cannot silently enlarge the sampled area.
+
 ## Deep learning and hosted imagery
 
 **Analyze › Deep Learning Tools** trains a neural network (a multilayer perceptron) on the pixels
