@@ -3689,7 +3689,8 @@ fn layouts_compose_export_and_round_trip() {
     assert!(pdf.windows(count.len()).any(|w| w == count.as_bytes()), "one PDF page per series page");
     assert_eq!(s.project.layouts[0].series.as_ref().unwrap().page, 1, "the shown page is restored");
     assert_eq!(scale_of(&s), 3_000_000.0, "and so is the frame's zoom");
-    assert!(s.run("layout.export", &json!({"path": dir.join("x.svg").display().to_string()})).is_err());
+    // A format the export has no writer for is refused.
+    assert!(s.run("layout.export", &json!({"path": dir.join("x.tiff").display().to_string()})).is_err());
     // Layout files.
     let file = dir.join("europe.rgislayout");
     s.run("layout.save", &json!({"path": file.display().to_string()})).unwrap();
@@ -15976,6 +15977,61 @@ fn toggling_out_the_only_picked_layer_leaves_none_active() {
     assert_eq!(s.active_layer, None);
     assert!(s.selected_layers().is_empty());
     assert!(s.run("layer.remove", &Value::Null).is_err(), "nothing picked, nothing removed");
+}
+
+#[test]
+fn a_layout_exports_to_svg_with_each_element_its_own_group() {
+    let mut s = world();
+    s.run("layout.new", &json!({"page": "a4", "orientation": "landscape"})).unwrap();
+    let title = s
+        .run("layout.addElement", &json!({"kind": "text", "text": "Cities & rivers <2026>", "x": 20, "y": 10, "w": 150, "h": 15}))
+        .unwrap()["element"]
+        .as_u64()
+        .unwrap();
+    s.run("layout.addElement", &json!({"kind": "rectangle", "x": 5, "y": 5, "w": 40, "h": 20})).unwrap();
+    let out = std::env::temp_dir().join(format!("rustgis-layout-{}.svg", std::process::id()));
+    let r = s.run("layout.export", &json!({"path": out.to_string_lossy(), "dpi": 72})).unwrap();
+    let svg = std::fs::read_to_string(&out).unwrap();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(r["bytes"].as_u64(), Some(svg.len() as u64));
+    // A page in millimetres, as the layout is.
+    assert!(
+        svg.starts_with("<?xml") && svg.contains(r#"width="297mm" height="210mm" viewBox="0 0 297 210""#),
+        "{}",
+        svg.chars().take(300).collect::<String>()
+    );
+    let layout = &s.project.layouts[0];
+    for e in layout.elements.iter().filter(|e| e.visible) {
+        assert!(svg.contains(&format!(r#"<g id="element-{}""#, e.id)), "element {} ({}) has a group", e.id, e.name);
+    }
+    // Text stays text, escaped; shapes stay shapes; what has no vector form yet is a picture in its place.
+    assert!(svg.contains("Cities &amp; rivers &lt;2026&gt;</text>"), "the title is text");
+    assert!(svg.contains(&format!(r#"<g id="element-{title}""#)));
+    assert!(svg.contains("<rect"), "the rectangle is a shape");
+    assert!(svg.contains(r#"<image"#) && svg.contains("data:image/png;base64,"), "the map frame is a picture");
+    assert!(svg.trim_end().ends_with("</svg>"));
+    // SVG exports only the current series page, even when allPages is supplied.
+    s.run("layout.series", &json!({"layer": "Lakes", "nameField": "name"})).unwrap();
+    s.run("layout.seriesPage", &json!({"page": "next"})).unwrap();
+    s.run("layout.update", &json!({"element": title, "text": "Page {page} of {pages}: {pageName}"})).unwrap();
+    let before = s.project.layouts[0].clone();
+    s.run("layout.export", &json!({"path": out.to_string_lossy(), "dpi": 36, "allPages": true})).unwrap();
+    let svg = std::fs::read_to_string(&out).unwrap();
+    assert!(svg.contains("Page 2 of "));
+    assert_eq!(s.project.layouts[0], before, "export keeps the selected page and frame");
+    let _ = std::fs::remove_file(&out);
+    // A required map-source failure is reported without leaving an incomplete file.
+    let dir = std::env::temp_dir().join(format!("rustgis-svg-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut source = rustgis_map::source::SourceLayer::default();
+    source.path = Some(dir.join("missing.shp").display().to_string());
+    s.map_mut().layers[0].source = Some(source);
+    // Use a world view so the missing layer is visible on the exported page.
+    s.run("layout.frameZoom", &json!({"to": "full"})).unwrap();
+    let error = s.run("layout.export", &json!({"path": out.to_string_lossy(), "dpi": 36})).unwrap_err();
+    assert!(error.contains("map sources"), "{error}");
+    assert!(!out.exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
