@@ -440,6 +440,35 @@ pub enum RightPane {
     Plugin,
 }
 
+/// A Unique Values field choice scoped to the layer and renderer that opened it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingUniqueSymbology {
+    project: u64,
+    map: usize,
+    layer: u32,
+    renderer: std::sync::Arc<rustgis_engine::map::Renderer>,
+    pub field: String,
+}
+
+impl PendingUniqueSymbology {
+    fn new(session: &Session, layer: &rustgis_engine::map::Layer, field: String) -> Self {
+        Self {
+            project: session.opened,
+            map: session.project.active_map,
+            layer: layer.id,
+            renderer: std::sync::Arc::new(layer.renderer.clone()),
+            field,
+        }
+    }
+
+    fn is_current(&self, session: &Session) -> bool {
+        self.project == session.opened
+            && self.map == session.project.active_map
+            && Some(self.layer) == session.active_layer
+            && session.map().layer(self.layer).is_some_and(|layer| layer.renderer == *self.renderer)
+    }
+}
+
 pub struct UiState {
     pub tab: String,
     pub backstage: bool,
@@ -612,6 +641,8 @@ pub struct UiState {
     pub copy_image: Option<egui::ColorImage>,
     /// The scale being typed into the status bar, while its box has focus.
     pub scale_text: Option<String>,
+    /// A field chosen in the Symbology pane before applying Unique Values.
+    pub symbology_pending: Option<PendingUniqueSymbology>,
 }
 
 impl UiState {
@@ -731,6 +762,7 @@ impl Default for UiState {
             layers_view: LayersView::DrawingOrder,
             dynamic_text: None,
             scale_text: None,
+            symbology_pending: None,
         }
     }
 }
@@ -1492,6 +1524,11 @@ impl RustGisApp {
         if let Err(e) = &r {
             log::info!("{id}: {e}");
         }
+        // Commands can replace the project, switch maps or change the renderer while the pane
+        // is closed. A field picked for the old context must not overwrite the new renderer.
+        if self.ui.symbology_pending.as_ref().is_some_and(|pending| !pending.is_current(&self.session)) {
+            self.ui.symbology_pending = None;
+        }
         // A project replacing this one hasn't been saved in the browser yet (opening a file
         // names it again).
         if r.is_ok() && matches!(id, "project.new" | "project.sample" | "project.open" | "project.openText" | "project.fromTemplate") {
@@ -1578,7 +1615,7 @@ impl RustGisApp {
         let active = self.session.active_layer.take();
         let needs = (spec.enabled)(&self.session).is_some();
         self.session.active_layer = active;
-        if !defaults && !(needs && (spec.enabled)(&self.session).is_none()) {
+        if !(defaults || needs && (spec.enabled)(&self.session).is_none()) {
             return None;
         }
         let map = self.session.map();
