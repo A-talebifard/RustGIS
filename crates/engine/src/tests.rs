@@ -9709,6 +9709,38 @@ fn streamed_layer_outside_its_zoom_range_reads_nothing() {
     assert!(sent.load(std::sync::atomic::Ordering::Relaxed) > before);
 }
 
+/// Load All Features on a layer whose web source is still opening waits for it to open, rather
+/// than fail with "the layer's source isn't open" (the server here holds its answers a while).
+#[test]
+fn load_all_features_waits_for_a_source_still_opening() {
+    use rustgis_data::{Dataset, Feature, Geometry, GeometryType};
+    let mut ds = Dataset::new("pts", GeometryType::Point, vec![]);
+    for i in 0..100u32 {
+        let c = rustgis_geom::Coord::new(f64::from(i) * 0.1, 1.0);
+        ds.features.push(Feature { id: u64::from(i) + 1, geometry: Some(Geometry::Point(c)), attrs: vec![] });
+    }
+    let fgb = rustgis_data::source::fgb::write(&ds).unwrap();
+    let (base, _) = serve_ranges(fgb.clone());
+    let mut s = Session::new(Project::default());
+    s.run("layer.addUrl", &json!({"url": format!("{base}/pts.fgb")})).unwrap();
+    let text = serde_json::to_string(&s.project).unwrap();
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (slow, _) = serve_gated(fgb, true, Some(gate.clone()));
+    let mut t = Session::new(Project::default());
+    t.run("project.openText", &json!({"text": text.replace(&base, &slow)})).unwrap();
+    let layer = t.map().layers.iter().find(|l| l.is_streamed()).unwrap().clone();
+    // Started as the view starts it, and held by the server: still opening when the load begins.
+    let mut started = layer.source.clone().unwrap();
+    started.open().unwrap();
+    assert!(!started.is_open() && started.is_pending());
+    let load = std::thread::spawn(move || layer.load_all());
+    // Still waiting while the server holds its answers, rather than failed at once.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!load.is_finished(), "the load didn't wait for the source: {:?}", load.join().unwrap().err());
+    gate.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(load.join().unwrap().unwrap().features.len(), 100);
+}
+
 /// A FlatGeobuf and a GeoParquet by their address are read in place, by range: a view fetches a
 /// small part of the file; the project keeps the address and reads it again; asked to, a file is
 /// downloaded whole instead.
