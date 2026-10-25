@@ -624,6 +624,73 @@ fn rivers_are_labelled_along_their_lines_in_italics() {
 }
 
 #[test]
+fn a_qgis_project_in_degrees_opens_in_equirectangular() {
+    // QGIS draws a project in degrees as plate carrée, longitude and latitude as x and y.
+    // A PROJ string goes where QGIS keeps it for a system without an authority code.
+    let qgs = |crs: &str| {
+        let tag = if crs.starts_with('+') { "proj4" } else { "authid" };
+        format!(
+            r#"<qgis version="3.10.0"><title>World</title><projectCrs><spatialrefsys><{tag}>{crs}</{tag}></spatialrefsys></projectCrs>
+  <mapcanvas name="theMapCanvas"><extent><xmin>5</xmin><ymin>45</ymin><xmax>15</xmax><ymax>50</ymax></extent></mapcanvas><projectlayers/></qgis>"#
+        )
+    };
+    let mut s = world();
+    for (crs, datum_note) in [
+        ("EPSG:4326", false),
+        ("EPSG:4258", false),
+        ("OGC:CRS84", false),
+        ("EPSG:4314", true),
+        // Saved without an authority code: its PROJ string.
+        ("+proj=longlat +datum=WGS84 +no_defs", false),
+        ("+proj=longlat +datum=WGS84 +pm=0.0 +no_defs", false),
+        ("+proj=longlat +ellps=bessel +towgs84=598.1,73.7,418.2,0.202,0.045,-2.455,6.7 +no_defs", true),
+    ] {
+        let out = s.run("project.importQgis", &json!({"text": qgs(crs)})).unwrap();
+        assert_eq!(s.map().projection.code(), "equirectangular", "{crs}");
+        let text = serde_json::to_string(&out["notes"]).unwrap();
+        assert!(!text.contains("Web Mercator"), "{crs}: {text}");
+        assert_eq!(text.contains("drawn in Equirectangular on WGS 84"), datum_note, "{crs}: {text}");
+        // The saved view, read in degrees.
+        let c = s.map().to_lonlat(s.map().camera.center).unwrap();
+        assert!((c.x - 10.0).abs() < 0.5 && (c.y - 47.5).abs() < 0.5, "{crs}: {c:?}");
+    }
+    // Longitudes from Paris (in grads): drawn the same way, the view left to the data.
+    let out = s.run("project.importQgis", &json!({"text": qgs("EPSG:4807")})).unwrap();
+    assert_eq!(s.map().projection.code(), "equirectangular");
+    let text = serde_json::to_string(&out["notes"]).unwrap();
+    assert!(text.contains("on WGS 84") && text.contains("from Greenwich"), "{text}");
+    // A projected one keeps its own projection.
+    s.run("project.importQgis", &json!({"text": qgs("EPSG:2056").replace("<xmin>5</xmin>", "<xmin>2600000</xmin>")})).unwrap();
+    assert_eq!(s.map().projection.code(), "EPSG:2056");
+}
+
+#[test]
+fn a_qgis_project_with_a_geographic_proj_string_keeps_its_saved_view() {
+    for (crs, datum_note, saved_view) in [
+        ("+proj=longlat +datum=WGS84", false, true),
+        ("+proj=latlong +datum=WGS84", false, true),
+        ("+proj=lonlat +datum=WGS84", false, true),
+        ("+proj=latlon +datum=WGS84", false, true),
+        ("  +datum=WGS84 +proj=longlat +no_defs", false, true),
+        ("+proj=longlat +datum=potsdam", true, true),
+        ("+proj=longlat +datum=WGS84 +pm=paris", true, false),
+    ] {
+        let text = format!(
+            r#"<qgis><projectCrs><spatialrefsys><authid></authid><proj4>{crs}</proj4></spatialrefsys></projectCrs>
+<mapcanvas><extent><xmin>5</xmin><ymin>45</ymin><xmax>15</xmax><ymax>50</ymax></extent></mapcanvas><projectlayers/></qgis>"#
+        );
+        let mut s = world();
+        let out = s.run("project.importQgis", &json!({"text": text})).unwrap();
+        assert_eq!(s.map().projection.code(), "equirectangular", "{crs}");
+        let notes = serde_json::to_string(&out["notes"]).unwrap();
+        assert!(!notes.contains("Web Mercator"), "{crs}: {notes}");
+        assert_eq!(notes.contains("drawn in Equirectangular on WGS 84"), datum_note, "{crs}: {notes}");
+        let c = s.map().to_lonlat(s.map().camera.center).unwrap();
+        assert_eq!((c.x - 10.0).abs() < 0.5 && (c.y - 47.5).abs() < 0.5, saved_view, "{crs}: {c:?}");
+    }
+}
+
+#[test]
 fn a_qgis_project_opens_as_a_map_and_a_qgis_style_styles_a_layer() {
     let dir = std::env::temp_dir().join(format!("rustgis-qgis-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("data")).unwrap();
