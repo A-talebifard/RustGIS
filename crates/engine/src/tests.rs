@@ -689,6 +689,10 @@ fn a_qgis_project_opens_as_a_map_and_a_qgis_style_styles_a_layer() {
     s.run("style.importQgis", &json!({"layer": "Rivers", "text": qml})).unwrap();
     let rivers = s.map().layer_by_name("Rivers").unwrap();
     assert_eq!((rivers.line_strokes.len(), rivers.transparency), (2, 50.0));
+    // A raster's style on a feature layer says its colouring is left out.
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="singlebandgray" grayBand="1"/></pipe></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "Rivers", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("a raster's colouring"), "{out}");
     assert!(s.run("style.importQgis", &json!({"layer": "Rivers", "text": "<nonsense"})).is_err());
     // A style saved from another layer: classes and labels by fields Rivers hasn't are noted, and
     // the label class that has nothing to label from is switched off.
@@ -947,6 +951,35 @@ fn with_raster() -> Session {
     let mut s = world();
     s.run("layer.addDataBytes", &json!({"fileName": "scene.tif", "data": utm_tiff_b64()})).unwrap();
     s
+}
+
+/// A QGIS raster style colours a raster layer; one reading a band the raster hasn't is noted and
+/// leaves it as it was.
+#[test]
+fn a_qgis_raster_style_colours_a_raster() {
+    let mut s = with_raster();
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="multibandcolor" redBand="3" greenBand="2" blueBand="1" opacity="0.5"/>
+        <brightnesscontrast brightness="0" contrast="25" gamma="1"/></pipe></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert_eq!(out["notes"], json!([]));
+    let l = s.map().layer_by_name("scene").unwrap();
+    let st = &l.raster.as_ref().unwrap().style;
+    assert_eq!(
+        (&st.renderer, st.contrast, l.transparency),
+        (&rustgis_map::raster::RasterRenderer::Rgb { red: 2, green: 1, blue: 0 }, 25.0, 50.0)
+    );
+    let before = st.clone();
+    // A style that reads a band the raster hasn't leaves it as it was, its opacity too.
+    let qml = r#"<qgis version="4.2.3" layerType="Raster"><pipe><rasterrenderer type="singlebandgray" grayBand="5"/></pipe><layerOpacity>0.2</layerOpacity></qgis>"#;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("band 5 of a raster with 3"), "{out}");
+    let l = s.map().layer_by_name("scene").unwrap();
+    assert_eq!((&l.raster.as_ref().unwrap().style, l.transparency), (&before, 50.0));
+    // Pixels not there yet (a remote raster still loading): applied, and noted as unchecked.
+    let id = s.map().layer_by_name("scene").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().raster.as_mut().unwrap().data = None;
+    let out = s.run("style.importQgis", &json!({"layer": "scene", "text": qml})).unwrap();
+    assert!(serde_json::to_string(&out["notes"]).unwrap().contains("before the raster's bands could be checked"), "{out}");
 }
 
 /// The parts of a large GeoTIFF the web app reads (#140), opened and kept in a project: a
