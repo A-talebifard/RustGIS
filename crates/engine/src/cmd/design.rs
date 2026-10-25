@@ -1065,6 +1065,10 @@ fn snap(s: &mut Session, p: &Json) -> CmdResult {
 
 /// Where a point at `c` (longitude/latitude) snaps to, and to what, if anywhere. Read-only, for
 /// drawing the snap marker without running a command (projected shapes are cached on the way).
+///
+/// Point features and MultiPoint members are vertex targets only, never edges or line ends.
+/// Vertices and line ends take priority over edges. Equal distances keep the original layer,
+/// row and member order.
 pub fn snap_at(s: &mut Session, c: Coord) -> Option<(Coord, &'static str)> {
     snap_except(s, c, None)
 }
@@ -1135,8 +1139,15 @@ fn snap_excluding(
                 Geometry::Polygon(polys) => polys.iter().flatten().collect(),
                 _ => Vec::new(),
             };
-            if let Geometry::Point(pt) = g {
-                consider((pt.x - m.x).powi(2) + (pt.y - m.y).powi(2), *pt, "vertex");
+            if sn.vertex {
+                let points: &[Coord] = match g {
+                    Geometry::Point(pt) => std::slice::from_ref(pt),
+                    Geometry::MultiPoint(points) => points,
+                    _ => &[],
+                };
+                for pt in points {
+                    consider((pt.x - m.x).powi(2) + (pt.y - m.y).powi(2), *pt, "vertex");
+                }
             }
             for path in paths {
                 if sn.end && matches!(g, Geometry::Line(_)) {
