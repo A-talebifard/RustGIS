@@ -17331,3 +17331,59 @@ fn raster_projection_failures_are_reported_for_zonal_statistics_and_clipping() {
     let data = s.map().layer_by_name("clipped").unwrap().raster.as_ref().unwrap().data.as_ref().unwrap();
     assert_eq!((data.width, data.height), (8, 8));
 }
+
+#[test]
+fn simplify_large_tolerances_keep_a_small_polygon_and_one_step_undo() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    let ring = (0..=40)
+        .map(|i| {
+            let angle = (i % 40) as f64 * std::f64::consts::TAU / 40.0;
+            Coord::new(10.5 + 0.05 * angle.cos(), 46.5 + 0.05 * angle.sin())
+        })
+        .collect();
+    let mut zones = Dataset::new("zones", GeometryType::Polygon, vec![Field::new("code", FieldType::Text)]);
+    zones.push(Some(Geometry::Polygon(vec![vec![ring]])), vec![Value::Text("Z1".into())]);
+    s.map_mut().add_layer(rustgis_map::Layer::new(0, zones.clone()));
+    let mut previous = zones.features[0].geometry.as_ref().unwrap().coord_count();
+    for tolerance in [0.1, 0.5, 1.0, 2.0, 5.0, 25.0, 100.0] {
+        let depth = s.undo_depth();
+        s.run("gp.run", &json!({"tool":"simplify", "params":{"input":"zones", "tolerance":tolerance, "output":"simple"}})).unwrap();
+        let out = &s.map().layer_by_name("simple").unwrap().dataset;
+        assert_eq!(out.features.len(), 1);
+        assert_eq!(out.features[0].attrs, zones.features[0].attrs);
+        let count = out.features[0].geometry.as_ref().unwrap().coord_count();
+        assert!((4..=previous).contains(&count), "{tolerance} km: {count} > {previous}");
+        previous = count;
+        assert_eq!(s.map().layer_by_name("zones").unwrap().dataset, zones);
+        assert_eq!(s.undo_depth(), depth + 1);
+        assert!(s.undo());
+        assert!(s.map().layer_by_name("simple").is_none());
+        assert!(s.redo());
+        assert_eq!(s.map().layer_by_name("simple").unwrap().dataset.features[0].geometry.as_ref().unwrap().coord_count(), count);
+        assert!(s.undo());
+    }
+    assert_eq!(previous, 4);
+}
+
+#[test]
+fn publication_locator_keeps_small_islands_across_the_antimeridian() {
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    for (lon, lat) in [(0.0_f64, -5.0), (180.0, -5.0), (-180.0, 70.0)] {
+        let mut s = world();
+        let ring: Vec<_> = [(-0.0005, 0.0), (0.0005, 0.0), (0.0005, 0.001), (-0.0005, 0.001), (-0.0005, 0.0)]
+            .into_iter()
+            .map(|(x, y)| Coord::new((lon + x + 180.0).rem_euclid(360.0) - 180.0, lat + y))
+            .collect();
+        let original = Geometry::Polygon(vec![vec![ring]]);
+        let mut island = Dataset::new("island", GeometryType::Polygon, vec![]);
+        island.push(Some(original.clone()), vec![]);
+        s.map_mut().add_layer(rustgis_map::Layer::new(0, island));
+        let r = s.run("layout.publication", &json!({"extent": [-46.8, -11.6, -38.5, -2.2]})).unwrap();
+        let locator = s.project.maps.iter().find(|m| Some(m.name.as_str()) == r["locator"].as_str()).unwrap();
+        let geometry = &locator.layer_by_name("island").unwrap().dataset.features[0].geometry;
+        assert_eq!(geometry.as_ref(), Some(&original), "island at {lon}, {lat}");
+    }
+}
