@@ -452,7 +452,7 @@ pub enum RightPane {
     Format,
     /// The selected feature layer's labels (#617).
     Labeling,
-    /// A Home › Web Data service: the one `UiState::web_data` names.
+    /// A Home › Add › Web Data service: the one `UiState::web_data` names.
     WebData,
     /// A plugin's panel: the one `UiState::plugin_panel` names.
     Plugin,
@@ -573,7 +573,7 @@ pub struct UiState {
     pub pending_csv: Option<Value>,
     /// CRS override for the next Shapefile picked by Import Shapefile with Projection.
     pub pending_shapefile: Option<Value>,
-    /// Data downloading from web addresses (Add Data › From URL): the address, the parameters to
+    /// Data downloading from web addresses (Home › Add › Add Data › From URL): the address, the parameters to
     /// add it with, and where the download lands.
     pub downloads: Vec<(u64, String, Value, Slot<Result<Vec<u8>, String>>)>,
     /// A project downloading from its web address (`ui.openUrl`, a `?project=` link): the
@@ -647,7 +647,7 @@ pub struct UiState {
     pub connections_saved: u64,
     /// The default raster style last kept in the preferences.
     pub raster_defaults_saved: rustgis_engine::map::RasterDefaults,
-    /// Add Data › Zarr…: its store, choices and fetches.
+    /// Home › Add › Add Data › Zarr…: its store, choices and fetches.
     pub zarr: zarrui::State,
     /// A layout picture waiting for its image file (web).
     pub pending_layout_picture: bool,
@@ -1817,8 +1817,6 @@ impl RustGisApp {
             "ui.pane.contents" => self.ui.left = if self.ui.left == Some(LeftPane::Contents) { None } else { Some(LeftPane::Contents) },
             "ui.pane.catalog" => self.ui.left = if self.ui.left == Some(LeftPane::Catalog) { None } else { Some(LeftPane::Catalog) },
             "ui.pane.sources" => self.ui.left = if self.ui.left == Some(LeftPane::Sources) { None } else { Some(LeftPane::Sources) },
-            // Unlike `ui.pane.sources` this never closes the pane: a menu entry that opens it.
-            "ui.openSources" => self.ui.left = Some(LeftPane::Sources),
             "ui.pane.geoprocessing" => toggle_right(&mut self.ui, RightPane::Geoprocessing),
             "ui.pane.symbology" => {
                 // Showing its tab already open needs no layer.
@@ -2326,7 +2324,7 @@ impl RustGisApp {
                     "arcgis" => "arcgis",
                     _ => "auto",
                 };
-                // Opened from a menu (Home › Web Data): the dialog with it.
+                // Opened from a menu (Home › Add › Web Data): the dialog with it.
                 if self.dialogs.open != Some("addService") {
                     self.run("ui.dialog", json!({"name": "addService"}))?;
                 }
@@ -3165,7 +3163,7 @@ impl RustGisApp {
         Ok(Value::Null)
     }
 
-    /// Adds the data downloads that have landed (Add Data › From URL). The bytes go to the session
+    /// Adds the data downloads that have landed (Home › Add › Add Data › From URL). The bytes go to the session
     /// as they are; a download of a project that has since been closed is dropped.
     fn poll_downloads(&mut self) {
         let landed = self.ui.project_download.as_ref().and_then(|(id, url, slot)| {
@@ -3451,7 +3449,7 @@ impl RustGisApp {
             self.ui.dynamic_text = None;
         }
         // Addresses commands asked for where they couldn't download themselves (the browser):
-        // fetched off the frame and added when they land, as Add Data › From URL does.
+        // fetched off the frame and added when they land, as Home › Add › Add Data › From URL does.
         for p in self.session.take_url_requests() {
             if let Err(e) = self.run("ui.addUrl", p) {
                 self.session.notify(e, true);
