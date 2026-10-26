@@ -257,14 +257,11 @@ fn grid(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
     egui::Grid::new(("label_pane", id)).num_columns(2).min_col_width(LABEL_W).spacing(vec2(8.0, 6.0)).show(ui, add);
 }
 
-/// The rows the field list shows before it scrolls.
-const FIELD_ROWS: usize = 8;
-
 /// The chosen class's field and SQL clause (#618) on one page, as ArcGIS Pro's Class tab shows the
 /// fields above the expression: what the label shows, then the features it labels. Named Content,
 /// not Class, as the class itself is the one chosen in the card above the tabs.
 fn content(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, t: &Tokens) {
-    field(app, ui, l, c, t);
+    field(app, ui, l, c);
     ui.add_space(4.0);
     heading(ui, "SQL Query");
     sql(app, ui, l, c, t);
@@ -412,52 +409,61 @@ fn new_name(labels: &Labeling) -> String {
         .unwrap_or_default()
 }
 
-/// The field the class labels with, chosen in a list of the layer's fields, so they show without
-/// opening a menu. A list longer than [`FIELD_ROWS`] scrolls, and a filter above it narrows it.
-fn field(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, t: &Tokens) {
-    heading(ui, "Field");
-    let fields = &l.dataset.fields;
-    // The class's own: one typed for another class would hide this one's field.
-    let key = egui::Id::unique((layer_key(app, l), c.name)).with("label_pane_field_filter");
-    let mut filter = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_default();
-    // Only while its box shows: one kept from when the layer had more fields would hide some, with
-    // no box to clear it in.
-    let needle = if fields.len() > FIELD_ROWS {
-        if crate::widgets::search_field(ui, &mut filter, tl!("Filter fields")).changed() {
-            ui.data_mut(|d| d.insert_temp(key, filter.clone()));
-        }
-        filter.to_lowercase()
-    } else {
-        String::new()
-    };
-    let cur = &c.it.field;
-    // The class's field scrolls into view when the layer, the class or the field changes, for a
-    // few passes (a pass that egui discards drops its scroll request), not on every frame, so the
-    // list still scrolls by hand.
-    let seen_key = egui::Id::unique("label_pane_field_seen");
-    let now = egui::Id::unique((layer_key(app, l), c.name, cur.as_str())).value();
-    let (seen, scrolls): (u64, u8) = ui.data(|d| d.get_temp(seen_key)).unwrap_or_default();
-    let scrolls = if seen == now { scrolls } else { 0 };
-    if scrolls < 3 {
-        ui.data_mut(|d| d.insert_temp(seen_key, (now, scrolls + 1)));
+/// A list's search box, as its first row: the text kept for `id` while the list is reopened,
+/// lowercased to match names by. The Field and Font boxes share it, so they search alike.
+fn list_search(ui: &mut Ui, id: egui::Id, hint: &str) -> String {
+    let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
+    if ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint)).changed() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
     }
-    let frame = egui::Frame::NONE.fill(t.input).stroke(Stroke::new(1.0, t.input_border)).corner_radius(CornerRadius::same(4));
-    frame.inner_margin(egui::Margin::same(4)).show(ui, |ui| {
-        let area = egui::ScrollArea::vertical().id_salt("label_pane_fields").max_height(FIELD_ROWS as f32 * 22.0);
-        area.auto_shrink([false, true]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for f in fields.iter().filter(|f| f.name.to_lowercase().contains(&needle)) {
-                let on = f.name == *cur;
-                let row = egui::Button::selectable(on, &f.name).min_size(vec2(ui.available_width(), 20.0));
-                let resp = ui.add(row);
-                if on && scrolls < 3 {
-                    resp.scroll_to_me(None);
+    text.to_lowercase()
+}
+
+/// A pick ends the search: the list opens whole next time.
+fn end_search(ui: &Ui, id: egui::Id) {
+    ui.data_mut(|d| d.remove::<String>(id));
+}
+
+/// The field the class labels with, chosen as the font is: the box shows it (or says it is gone,
+/// as a style or a service can leave it), and the list has a search for a layer with many.
+fn field(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
+    let fields = &l.dataset.fields;
+    let cur = &c.it.field;
+    // A layer without fields leaves its classes on none.
+    let shown = match l.dataset.field_index(cur) {
+        Some(_) => cur.clone(),
+        None if cur.is_empty() => tl!("<None>").to_string(),
+        None => crate::i18n::fmt("{name} (not in the layer)", &[("name", cur)]),
+    };
+    let search_id = layer_key(app, l).with("label_pane_field_search");
+    grid(ui, "field", |ui| {
+        let input_label = ui.label(tl!("Field"));
+        egui::ComboBox::from_id_salt("label_pane_field")
+            .selected_text(shown)
+            .width(180.0)
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                let search = list_search(ui, search_id, tl!("Search fields"));
+                let mut matching = fields.iter().filter(|f| f.name.to_lowercase().contains(&search)).peekable();
+                if fields.is_empty() {
+                    ui.weak(tl!("This layer has no fields."));
+                } else if matching.peek().is_none() {
+                    ui.weak(tl!("No fields match"));
                 }
-                if resp.clicked() && !on {
-                    run(app, "labels.field", c.params(json!({"field": f.name})));
+                for f in matching {
+                    let on = f.name.eq_ignore_ascii_case(cur);
+                    // Any pick ends the search, the chosen field's too: the box closes on it.
+                    if ui.selectable_label(on, &f.name).clicked() {
+                        if !on {
+                            run(app, "labels.field", c.params(json!({"field": f.name})));
+                        }
+                        end_search(ui, search_id);
+                    }
                 }
-            }
-        });
+            })
+            .response
+            .labelled_by(input_label.id);
+        ui.end_row();
     });
 }
 
@@ -574,25 +580,25 @@ fn font(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class) {
         Some(name) if families::find(name).is_some() => name.to_string(),
         Some(name) => crate::i18n::fmt("{name} (not installed)", &[("name", name)]),
     };
-    let search_id = egui::Id::unique(("label_pane_font_search", l.id));
+    let search_id = layer_key(app, l).with("label_pane_font_search");
     egui::ComboBox::from_id_salt("label_pane_font")
         .selected_text(shown)
         .width(180.0)
         .height(320.0)
         .show_ui(ui, |ui| {
-            let mut search = ui.data_mut(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
-            if ui.add(egui::TextEdit::singleline(&mut search).hint_text(tl!("Search fonts"))).changed() {
-                ui.data_mut(|d| d.insert_temp(search_id, search.clone()));
-            }
+            let search = list_search(ui, search_id, tl!("Search fonts"));
             if ui.selectable_label(cur.is_none(), tl!("Label font")).clicked() {
                 run(app, "labels.style", c.params(json!({"font": ""})));
+                end_search(ui, search_id);
             }
-            let search = search.to_lowercase();
             let mut matching = installed.iter().filter(|f| f.listed && (search.is_empty() || f.name.to_lowercase().contains(&search)));
             for f in matching.by_ref().take(MAX_FONTS_SHOWN) {
                 let on = cur.is_some_and(|c| c.eq_ignore_ascii_case(&f.name));
-                if ui.selectable_label(on, &f.name).clicked() && !on {
-                    run(app, "labels.style", c.params(json!({"font": f.name})));
+                if ui.selectable_label(on, &f.name).clicked() {
+                    if !on {
+                        run(app, "labels.style", c.params(json!({"font": f.name})));
+                    }
+                    end_search(ui, search_id);
                 }
             }
             let more = matching.count();
@@ -807,9 +813,11 @@ mod tests {
         use egui::accesskit::Role;
         let mut h = harness(with_cities());
         h.run();
-        for (tab, inputs) in
-            [("Content", &["Class"][..]), ("Symbol", &["Font", "Class"]), ("Range", &["Out Beyond", "In Beyond", "Closest", "Farthest"])]
-        {
+        for (tab, inputs) in [
+            ("Content", &["Class", "Field"][..]),
+            ("Symbol", &["Font", "Class"]),
+            ("Range", &["Out Beyond", "In Beyond", "Closest", "Farthest"]),
+        ] {
             open_tab(&mut h, tab);
             for label in inputs {
                 assert!(h.query_by_role_and_label(Role::ComboBox, label).is_some(), "missing input: {label}");
@@ -819,11 +827,12 @@ mod tests {
         open_tab(&mut h, "Symbol");
         assert!(h.query_by_role_and_label(Role::SpinButton, "Size").is_some());
         open_tab(&mut h, "Content");
-        // The field list comes first, before the SQL query's field chips of the same names.
-        h.query_all_by_role_and_label(Role::Button, "pop_max").next().unwrap().click();
+        h.get_by_role_and_label(Role::ComboBox, "Field").click();
+        h.run();
+        h.get_by_label("pop_max").click();
         h.run();
         assert_eq!(h.state().session.map().layer_by_name("Cities").unwrap().labels.default.field, "pop_max");
-        assert!(h.query_by_label("+ New expression").is_some(), "the SQL query is beside the fields");
+        assert!(h.query_by_label("+ New expression").is_some(), "the SQL query is beside the field");
     }
 
     #[test]
@@ -1197,30 +1206,64 @@ mod tests {
         h.run();
     }
 
-    /// The field filter is the class's (#858): another class shows every field, its own among
-    /// them, and the first gets its filter back.
+    /// The field box searches the layer's fields, says when none matches, and names a field the
+    /// layer doesn't have rather than showing none (#858).
     #[test]
-    fn each_class_has_its_own_field_filter() {
+    fn the_field_box_searches_and_names_a_missing_field() {
         use egui::accesskit::Role;
-        super::families::installed();
-        let mut app = RustGisApp::with_sample();
-        // Countries has more fields than the list shows, so it has a filter.
-        let id = layer_id(&app, "Countries");
-        app.session.run("layer.select", &json!({"layer": id})).unwrap();
-        app.run("labels.class.add", json!({"name": "Big"})).unwrap();
-        app.run("labels.field", json!({"class": "Big", "field": "iso_a3"})).unwrap();
+        let mut app = with_cities();
+        // A style or a service can leave a class on a field the layer lacks.
+        let id = layer_id(&app, "Cities");
+        app.session.map_mut().layer_mut(id).unwrap().labels.default.field = "gone".into();
         let mut h = harness(app);
         h.run();
-        h.get_by_role(Role::TextInput).focus();
+        assert!(shown(&h, "gone (not in the layer)"));
+        let search = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_role_and_label(Role::ComboBox, "Field").click();
+            h.run();
+            h.get_by_role(Role::TextInput).focus();
+            h.run();
+            h.get_by_role(Role::TextInput).type_text(text);
+            h.run();
+        };
+        search(&mut h, "pop");
+        assert!(h.query_by_label("adm0name").is_none(), "the search narrows the list");
+        h.get_by_label("pop_max").click();
         h.run();
-        h.get_by_role(Role::TextInput).type_text("pop");
+        assert_eq!(labels(h.state()).default.field, "pop_max");
+        assert!(shown(&h, "pop_max"));
+        // Picking the chosen field again ends a search too; the pick before had ended the first.
+        search(&mut h, "pop");
+        assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("pop"), "the pick ended the search");
+        h.get_by_role_and_label(Role::Button, "pop_max").click();
         h.run();
-        assert!(h.query_by_role_and_label(Role::Button, "iso_a3").is_none(), "Default's list is filtered");
-        pick_class(&mut h, "Default", "Big");
-        assert!(h.query_by_role_and_label(Role::Button, "iso_a3").is_some(), "Big's field is in its list");
-        assert!(h.query_by_role_and_label(Role::Button, "continent").is_some(), "Big's list is whole");
-        pick_class(&mut h, "Big", "Default");
-        assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("pop"), "Default keeps its filter");
+        // A pick ends the search: the box reopens on the whole list.
+        h.get_by_role_and_label(Role::ComboBox, "Field").click();
+        h.run();
+        assert!(h.query_by_label("adm0name").is_some(), "the list opens whole after a pick");
+        h.get_by_role_and_label(Role::ComboBox, "Field").click();
+        h.run();
+        search(&mut h, "zzz");
+        assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("zzz"), "the pick ended the search");
+        assert!(h.query_by_label("No fields match").is_some());
+    }
+
+    /// A layer without fields has no label field to offer: the box shows none, and its list says
+    /// why rather than that nothing matches.
+    #[test]
+    fn a_layer_without_fields_has_no_label_field() {
+        use egui::accesskit::Role;
+        use rustgis_engine::data::{Dataset, GeometryType};
+        let mut app = RustGisApp::with_sample();
+        let id = app.session.map_mut().add_dataset(Dataset::new("Bare", GeometryType::Point, vec![]));
+        app.session.run("layer.select", &json!({"layer": id})).unwrap();
+        let mut h = harness(app);
+        h.run();
+        assert!(shown(&h, "<None>"));
+        h.get_by_role_and_label(Role::ComboBox, "Field").click();
+        h.run();
+        assert!(h.query_by_label("This layer has no fields.").is_some());
+        assert!(h.query_by_label("No fields match").is_none());
     }
 
     /// The pane edits the class chosen, and only it; its steps name it, and Default's name none
