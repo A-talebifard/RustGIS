@@ -208,12 +208,22 @@ stale cache.
 
 ### Self-host the web app with Docker
 
-The `Dockerfile` at the root of the repository builds the web app the way the deploy does and
-serves it with nginx, so you need only [Docker](https://docs.docker.com/get-docker/):
+A ready-made image of the web app, served by nginx, is published to the GitHub Container
+Registry for x86-64 and arm64, so you need only [Docker](https://docs.docker.com/get-docker/):
 
 ```sh
-docker build -t rustgis-web .
-docker run --rm -p 8080:8080 rustgis-web   # http://localhost:8080
+docker run --rm -p 8080:8080 ghcr.io/opengeos/rustgis   # http://localhost:8080
+```
+
+`latest` is the newest release, `0.5.0` or `0.5` a given one (releases have images from 0.5.0
+on), and `edge` the newest build of `main`.
+
+To build the image yourself, the `Dockerfile` at the root of the repository builds the web app
+the way the deploy does:
+
+```sh
+docker build -t rustgis .
+docker run --rm -p 8080:8080 rustgis
 ```
 
 The image holds only the built files and runs nginx as a non-root user on port 8080. Its pages
@@ -230,9 +240,25 @@ The image is for the platform of the machine that builds it. To build it for ano
 on an Apple silicon Mac for an x86-64 server, add `--platform linux/amd64` to `docker build`.
 With a builder that can build several platforms (one made by `docker buildx create --use`, or
 Docker Desktop's containerd image store),
-`docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/rustgis-web --push .`
+`docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/rustgis --push .`
 publishes one image for both. The app itself is WebAssembly, so it is compiled once, on the
 machine that builds it, whichever platforms the image is for.
+
+### The command line in Docker
+
+`ghcr.io/opengeos/rustgis-cli` holds the [command line](cli.md), `rustgis-cli`, on a slim Debian,
+for x86-64 and arm64, with the same tags. It runs in `/data`, so mount the folder to work on
+there:
+
+```sh
+docker run --rm -v "$PWD:/data" ghcr.io/opengeos/rustgis-cli info cities.geojson
+docker run --rm -v "$PWD:/data" ghcr.io/opengeos/rustgis-cli render cities.geojson map.png --basemap ocean
+```
+
+It runs as a user with ID 1000, the first user on most Linux systems, so the files it writes are
+yours; elsewhere, add `--user "$(id -u):$(id -g)" -e HOME=/tmp`. The optional GDAL, DuckDB and
+GeoLibre programs aren't in the image. To build it yourself:
+`docker build -f packaging/docker/cli.Dockerfile -t rustgis-cli .`
 
 ## Fonts
 
