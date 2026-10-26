@@ -18,6 +18,7 @@ pub mod logo;
 mod mesh;
 pub mod pdf;
 mod picture;
+mod point_marks;
 pub mod post;
 mod raster;
 pub mod report;
@@ -865,7 +866,18 @@ impl Ctx<'_> {
         true
     }
 
-    fn highlight(&self, pm: &mut Pixmap, g: &Geometry, s: &Symbol, strokes: &[LineStroke]) {
+    /// A point's marks, or its marker turned ([`point_marks::draw`]), unless it lies off the picture.
+    fn marks(&self, pm: &mut Pixmap, c: Coord, s: &Symbol, strokes: &[LineStroke], turn: f32, halo: Option<Rgba>) {
+        let (x, y) = self.px(c);
+        let reach = (point_marks::reach(s, strokes) + 4.0) * self.ppp;
+        if !(x.is_finite() && y.is_finite()) || x < -reach || y < -reach || x > pm.width() as f32 + reach || y > pm.height() as f32 + reach
+        {
+            return;
+        }
+        point_marks::draw(pm, x, y, s, strokes, turn, halo, self.ppp);
+    }
+
+    fn highlight(&self, pm: &mut Pixmap, g: &Geometry, s: &Symbol, strokes: &[LineStroke], turn: f32) {
         let cyan = paint(SELECTION, 1.0);
         match g {
             Geometry::Line(parts) if !strokes.is_empty() => {
@@ -892,6 +904,10 @@ impl Ctx<'_> {
                     .collect();
                 self.stacked_line(pm, parts, s, &halo);
                 self.stacked_line(pm, parts, s, strokes);
+            }
+            Geometry::Point(c) if !point_marks::plain(strokes, turn) => self.marks(pm, *c, s, strokes, turn, Some(SELECTION)),
+            Geometry::MultiPoint(v) if !point_marks::plain(strokes, turn) => {
+                v.iter().for_each(|c| self.marks(pm, *c, s, strokes, turn, Some(SELECTION)))
             }
             Geometry::Point(c) => self.marker(pm, *c, s, 1.0, Some(SELECTION)),
             Geometry::MultiPoint(v) => v.iter().for_each(|c| self.marker(pm, *c, s, 1.0, Some(SELECTION))),
@@ -2026,6 +2042,7 @@ pub fn gpu_may_turn(map: &Map, view: &View) -> bool {
             && l.aggregation.is_none()
             && !l.graphics
             && !l.has_strokes()
+            && l.marker_rotation.is_none()
             && (l.extrusion.is_none() || view.camera.pitch != 0.0)
             && !(view.camera.pitch != 0.0 && l.renderer.has_char_markers() && stands_up(map, l))
     })
@@ -2271,6 +2288,9 @@ fn stands_up(map: &Map, layer: &rustgis_map::Layer) -> bool {
         && layer.mask.is_none()
         && layer.blend == rustgis_map::effects::Blend::Normal
         && map.swipe.is_none_or(|(id, _)| id != layer.id)
+        // Marks and turned markers stay on the ground, drawn as the flat map draws them.
+        && !layer.has_strokes()
+        && layer.marker_rotation.is_none()
         && rows.is_some_and(|n| n <= MAX_UPRIGHT_POINTS as u64)
 }
 
@@ -2918,7 +2938,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
         } else {
             Default::default()
         };
-        let mut highlights: Vec<(usize, Geometry, Symbol, Vec<LineStroke>)> = Vec::new();
+        let mut highlights: Vec<(usize, Geometry, Symbol, Vec<LineStroke>, f32)> = Vec::new();
         // The GPU mesh vertices the layer has left: a streamed layer's batches share them, so
         // one too dense to mesh goes to the CPU however it is split.
         let mut mesh_room = mesh::MAX_LAYER_VERTICES;
@@ -3015,6 +3035,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                 && layer.extrusion.is_none()
                 && !layer.graphics
                 && !layer.has_strokes()
+                && layer.marker_rotation.is_none()
                 && !upright.contains(&layer.id);
             // Lyon refuses degenerate geometry tiny-skia draws fine, a layer too dense to mesh
             // (`MAX_LAYER_VERTICES`) is quicker splatted, and zoomed in far, features reaching too
@@ -3080,7 +3101,21 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     let mut stacked: Vec<(&[Vec<Coord>], Symbol, &[LineStroke])> = Vec::new();
                     for (row, g) in drawn.iter().enumerate() {
                         let Some(g) = g else { continue };
-                        if rows.get(row) != Some(&true) || !visible(&extents.get(row).copied().unwrap_or_else(|| g.extent())) {
+                        let e = extents.get(row).copied().unwrap_or_else(|| g.extent());
+                        // A point's marks, shifted from it, may show while the point is off the view.
+                        let marked_in = || {
+                            if globe.is_some() || !matches!(g, Geometry::Point(_) | Geometry::MultiPoint(_)) {
+                                return false;
+                            }
+                            let (sym, strokes) = layer.style(row);
+                            if strokes.is_empty() {
+                                return false;
+                            }
+                            // In the layer's pixels (`ctx` is scaled by its size factor).
+                            let r = f64::from(point_marks::reach(&sym, strokes) * ctx.ppp) * map_per_px;
+                            Extent::new(e.min_x - r, e.min_y - r, e.max_x + r, e.max_y + r).intersects(&ctx.cull)
+                        };
+                        if rows.get(row) != Some(&true) || !(visible(&e) || marked_in()) {
                             continue;
                         }
                         // A picture draws in its row's turn, so graphics keep their order. (On the globe
@@ -3108,7 +3143,13 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                         {
                             continue;
                         }
+                        // A point's marks, or its marker turned by a field.
+                        let turn = layer.marker_turn(row);
                         match g {
+                            Geometry::Point(c) if !point_marks::plain(strokes, turn) => ctx.marks(dest, *c, &sym, strokes, turn, None),
+                            Geometry::MultiPoint(v) if !point_marks::plain(strokes, turn) => {
+                                v.iter().for_each(|c| ctx.marks(dest, *c, &sym, strokes, turn, None))
+                            }
                             Geometry::Line(parts) if !strokes.is_empty() && levels => stacked.push((parts, sym, strokes)),
                             Geometry::Line(parts) if !strokes.is_empty() => stroke_paths.draw(ctx, dest, parts, &sym, strokes),
                             _ => ctx.feature(dest, g, &sym),
@@ -3157,12 +3198,12 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     if complete_source {
                         let rank = ds_ptr.features.get(*row).and_then(|f| selected_order.get(&f.id)).copied().unwrap_or(usize::MAX);
                         let (symbol, strokes) = layer.style(*row);
-                        highlights.push((rank, (**g).clone(), symbol, strokes.to_vec()));
+                        highlights.push((rank, (**g).clone(), symbol, strokes.to_vec(), layer.marker_turn(*row)));
                     } else if gpu_done && mesh::collect_highlight(&mut cmds, g, &layer.symbol(*row), ctx.ppp, map_per_px).is_ok() {
                         // highlight tessellated into the scene, right after its layer
                     } else {
                         let (symbol, strokes) = layer.style(*row);
-                        ctx.highlight(&mut pm, g, &symbol, strokes);
+                        ctx.highlight(&mut pm, g, &symbol, strokes, layer.marker_turn(*row));
                         cpu_dirty = true;
                     }
                 }
@@ -3384,8 +3425,8 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
             }
         }
         highlights.sort_by_key(|(rank, ..)| *rank);
-        for (_, geometry, symbol, strokes) in highlights {
-            ctx.highlight(&mut pm, &geometry, &symbol, &strokes);
+        for (_, geometry, symbol, strokes, turn) in highlights {
+            ctx.highlight(&mut pm, &geometry, &symbol, &strokes, turn);
             cpu_dirty = true;
         }
     }
@@ -5852,6 +5893,57 @@ mod tests {
         let r = render(&mut m, &view).unwrap();
         assert_ne!(r.pixmap.pixel(100, 110).unwrap(), blank, "drawn 10 pt to the right");
         assert_eq!(r.pixmap.pixel(100, 100).unwrap(), blank, "nothing on the centreline");
+    }
+
+    #[test]
+    fn a_points_marks_and_rotation_draw_on_the_cpu_and_old_layers_stay_on_the_gpu() {
+        use rustgis_map::{LineMark, LineMarkers, LineStroke, MarkerRotation};
+        // One point at the centre of a 200 px view, its angle 90 in field "a".
+        let mut m = Map::new("Map");
+        m.basemap = rustgis_map::Basemap::Blank;
+        let mut d = Dataset::new("signs", GeometryType::Point, vec![rustgis_data::Field::new("a", rustgis_data::FieldType::Double)]);
+        d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![rustgis_data::Value::Float(90.0)]);
+        let id = m.add_dataset(d);
+        let camera = Camera { center: lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
+        let view = View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        // A plain point stays a GPU instance, as before.
+        let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+        assert!(cmd_kinds(&scene).contains(&"points"));
+        // A red square 30 pt right of the point, turned with the field to 30 pt below it.
+        let red = Rgba::rgb(255, 0, 0);
+        let square = LineMarkers { mark: LineMark::Marker(Marker::Square), size: 10.0, offset_along: 30.0, ..LineMarkers::default() };
+        let l = m.layer_mut(id).unwrap();
+        l.line_strokes = vec![LineStroke { color: Some(red), width: Some(0.0), markers: Some(square), ..LineStroke::default() }];
+        let is_red = |r: &Rendered, x: u32, y: u32| r.pixmap.pixel(x, y).is_some_and(|p| (p.red(), p.green(), p.alpha()) == (255, 0, 255));
+        let r = render(&mut m, &view).unwrap();
+        assert!(is_red(&r, 130, 100) && !is_red(&r, 100, 100), "right of the point, the symbol's own marker gone");
+        // The point 20 px left of the view, past its cull margin: its mark still shows, 10 px in.
+        let left = View { camera: Camera { center: Coord::new(camera.center.x + 120.0 * camera.res, camera.center.y), ..camera }, ..view };
+        let r = render(&mut m, &left).unwrap();
+        assert!(is_red(&r, 10, 100), "a mark shifted into the view");
+        // At twice its reference scale's size: the point 60 px left, its mark 60 px right of it.
+        let far = View { camera: Camera { center: Coord::new(camera.center.x + 160.0 * camera.res, camera.center.y), ..camera }, ..view };
+        let scale = m.ground_res_at(&far.camera) / rustgis_geom::PIXEL_M;
+        m.layer_mut(id).unwrap().reference_scale = Some(2.0 * scale);
+        let r = render(&mut m, &far).unwrap();
+        assert!(is_red(&r, 4, 100), "an enlarged mark shifted into the view");
+        m.layer_mut(id).unwrap().reference_scale = None;
+        m.layer_mut(id).unwrap().marker_rotation = Some(MarkerRotation { field: "a".into(), counterclockwise: false });
+        let r = render(&mut m, &view).unwrap();
+        assert!(is_red(&r, 100, 130) && !is_red(&r, 130, 100), "turned to below it");
+        // Selected: a halo round it, where it is.
+        m.layer_mut(id).unwrap().selection = vec![0];
+        let r = render(&mut m, &view).unwrap();
+        let p = r.pixmap.pixel(100, 136).unwrap();
+        assert!((p.red(), p.green(), p.blue()) != (255, 255, 255) && p.alpha() > 0, "{p:?}");
+        m.layer_mut(id).unwrap().selection.clear();
+        // Turned or marked, the layer draws on the CPU.
+        let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+        let kinds = cmd_kinds(&scene);
+        assert!(kinds.contains(&"image") && !kinds.contains(&"points"), "{kinds:?}");
+        m.layer_mut(id).unwrap().line_strokes.clear();
+        let Some(RenderOutput::Gpu(scene)) = render_backend(&mut m, &view, Backend::Gpu) else { panic!("gpu scene") };
+        assert!(!cmd_kinds(&scene).contains(&"points"), "turned alone, too");
     }
 
     #[test]
