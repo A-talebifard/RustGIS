@@ -1720,6 +1720,11 @@ fn hostile_params_never_panic() {
                 | "boundaries.countries"
                 // Asks Source Cooperative for its featured products.
                 | "sourcecoop.products"
+                // Starts a sign-in's callback server (RustGIS's own app on ArcGIS Online).
+                | "arcgis.signIn"
+                // Signs every session out, which the process's other tests use (its junk is
+                // covered by an_arcgis_token_in_a_service_address_reaches_its_layers).
+                | "arcgis.signOut"
         ) {
             continue;
         }
@@ -8361,6 +8366,53 @@ fn service_times_and_directories() {
     assert_eq!(v["layers"][1]["offer"], json!({"type": "service", "url": "https://x.example.org/arcgis/rest/services/Topo/MapServer"}));
     let e = s.run("service.add", &json!({"url": root, "text": dir, "layer": "Topo/MapServer"})).unwrap_err();
     assert!(e.contains("service.layers"), "{e}");
+}
+
+/// A secured ArcGIS service given by an address with `?token=…` (#914): the token is kept for its
+/// server and sent, as the request's credential, to the addresses built from the service's document (its tiles,
+/// its layers' queries), and no address the session lists or keeps carries it.
+#[test]
+fn an_arcgis_token_in_a_service_address_reaches_its_layers() {
+    use crate::render::rustgis_tiles::arcgis_auth;
+    let mut s = Session::new(Project::default());
+    let base = "https://secure914.example.org/server/rest/services/Roads/MapServer";
+    let doc = r#"{"currentVersion": 11, "mapName": "Roads", "capabilities": "Map,Query,Data", "singleFusedMapCache": true,
+        "tileInfo": {"rows": 256, "spatialReference": {"wkid": 102100}, "lods": [{"level": 0, "resolution": 156543.033928041}]},
+        "layers": [{"id": 0, "name": "Highways"}]}"#;
+    let v = s.run("service.layers", &json!({"url": format!("{base}?f=json&token=secret.Token-914"), "text": doc})).unwrap();
+    assert!(!v.to_string().contains("secret.Token-914"), "{v}");
+    let tiles = format!("{base}/tile/0/0/0");
+    let query = format!("{base}/0/query?where=1%3D1&f=geojson");
+    assert_eq!(arcgis_auth::authorization(&tiles).as_deref(), Some("Bearer secret.Token-914"));
+    assert_eq!(arcgis_auth::authorization(&query).as_deref(), Some("Bearer secret.Token-914"));
+    // Another server never gets it.
+    assert_eq!(arcgis_auth::authorization("https://other914.example.org/server/rest/services/Roads/MapServer/tile/0/0/0"), None);
+    // Added, the tile layer keeps the address without the token.
+    let layer =
+        v["layers"].as_array().unwrap().iter().find(|l| l["offer"]["type"] == "tiles").unwrap()["name"].as_str().unwrap().to_string();
+    s.run("service.add", &json!({"url": format!("{base}?token=secret.Token-914"), "layer": layer, "text": doc})).unwrap();
+    let project = format!("{:?}", s.project);
+    assert!(project.contains("secure914.example.org") && !project.contains("secret.Token-914"));
+    // Listed and forgotten by arcgis.status and arcgis.signOut.
+    let status = s.run("arcgis.status", &json!({})).unwrap();
+    assert!(
+        status["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["portal"] == "https://secure914.example.org/server" && x["kind"] == "token")
+    );
+    assert!(!status.to_string().contains("secret.Token-914"));
+    s.run("arcgis.signOut", &json!({"portal": "https://secure914.example.org/server/"})).unwrap();
+    assert_eq!(arcgis_auth::authorization(&tiles), None);
+    // Junk is refused rather than taken for "every session".
+    for junk in [json!({"portal": 7}), json!({"portal": [true]}), json!({"portal": {"a": 1}})] {
+        assert!(s.run("arcgis.signOut", &junk).is_err());
+    }
+    // Another kind of service keeps its own token parameter.
+    let wms = "https://wms914.example.org/rest/services/wms?token=keep-it";
+    let kept = crate::cmd::service::without_token(&json!({"url": wms, "type": "wms"})).unwrap();
+    assert!(kept.is_none() && arcgis_auth::authorization(wms).is_none());
 }
 
 /// Services from their capabilities: a WMS layer becomes a tile layer, an OGC API collection's
