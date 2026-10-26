@@ -449,6 +449,11 @@ impl Ramp {
         }
     }
 
+    /// Matplotlib's `gray`: black to white, how single-band rasters are first drawn.
+    pub fn gray() -> Ramp {
+        Ramp::Matplotlib(Colormap::find("gray", true).unwrap_or(Colormap(0)))
+    }
+
     /// Every built-in ramp: our own, then the matplotlib library's.
     pub fn builtin() -> impl Iterator<Item = Ramp> {
         Ramp::ALL.into_iter().chain(Colormap::all().map(Ramp::Matplotlib))
@@ -707,6 +712,9 @@ mod tests {
         let gray = Ramp::from_name("gray").unwrap();
         assert_eq!((gray.at(0.0), gray.at(1.0)), (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255)));
         assert_eq!(gray.at(0.5), Rgba::rgb(128, 128, 128));
+        // New rasters' default: matplotlib's gray itself, never another map the lookup fell back to.
+        assert_eq!(Ramp::gray(), gray);
+        assert_eq!(Ramp::gray().name(), "gray");
         let jet = Ramp::from_name("jet").unwrap();
         assert_eq!(jet.at(0.0), Rgba::rgb(0, 0, 127));
         let tab10 = Ramp::from_name("tab10").unwrap();
