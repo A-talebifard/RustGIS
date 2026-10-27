@@ -900,6 +900,8 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
                 rfd::AsyncFileDialog::new().add_filter("Shapefile", &["shp", "dbf", "shx", "prj", "cpg", "zip"])
             } else if purpose == "project" {
                 rfd::AsyncFileDialog::new().add_filter("RustGIS project", &["rgis", "rgisx", "rgispkg"])
+            } else if purpose == "qgisProject" {
+                rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("QGIS project"), &["qgs", "qgz"])
             } else if purpose == "item" {
                 rfd::AsyncFileDialog::new().add_filter(
                     "RustGIS items",
