@@ -16326,6 +16326,121 @@ fn tile_layers_keep_their_place_when_groups_change() {
     assert_eq!(names, ["Depths", "Streets"]);
 }
 
+/// A layer placed on its own spot, or a group moved to where it is, leaves the tile layers over
+/// them in their places: only a move hands them to the layer below.
+#[test]
+fn tile_layers_stay_over_a_layer_or_group_that_stays() {
+    let mut s = world();
+    s.run("map.addTiles", &json!({"url": "https://wms.example.org/{z}/{x}/{y}.png", "name": "Depths", "overlay": true})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Depths", "to": 2})).unwrap();
+    let before = stack_names(&s);
+    assert_eq!(before, ["Cities", "Rivers", "~Depths", "Lakes", "Countries"]);
+    // Lakes placed just above Countries, where it is.
+    s.run("layer.group", &json!({"layer": "Lakes", "group": null, "before": "Countries"})).unwrap();
+    assert_eq!(stack_names(&s), before);
+    // A group of Lakes and Countries moved to its own place.
+    s.run("group.add", &json!({"name": "Water", "layers": ["Lakes", "Countries"]})).unwrap();
+    let grouped = stack_names(&s);
+    s.run("group.move", &json!({"group": "Water", "to": 2})).unwrap();
+    assert_eq!(stack_names(&s), grouped);
+    // Moved, the group hands the tile layer over its layers on to the next layer down that
+    // stays: none here, so it goes under all.
+    s.run("group.move", &json!({"group": "Water", "to": 0})).unwrap();
+    assert_eq!(stack_names(&s), ["Lakes", "Countries", "Cities", "Rivers", "~Depths"]);
+}
+
+/// Two tile layers with no catalog id (and so the same one) keep their own places and order when
+/// a move leaves the layers where they were.
+#[test]
+fn tile_layers_without_ids_keep_their_places_when_nothing_moves() {
+    let mut s = world();
+    for name in ["Upper", "Lower"] {
+        s.run("map.addTiles", &json!({"url": format!("https://{name}.example.org/{{z}}/{{x}}/{{y}}.png"), "name": name, "overlay": true}))
+            .unwrap();
+    }
+    // Upper over Lakes (the layer placed next, on its own spot), Lower over Countries.
+    s.run("map.setTiles", &json!({"name": "Upper", "to": 3})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Lower", "to": 4})).unwrap();
+    for t in &mut s.map_mut().tiles {
+        t.id.clear();
+    }
+    let before = stack_names(&s);
+    assert_eq!(before, ["Cities", "Rivers", "~Upper", "Lakes", "~Lower", "Countries"]);
+    s.run("layer.group", &json!({"layer": "Lakes", "group": null, "before": "Countries"})).unwrap();
+    assert_eq!(stack_names(&s), before);
+}
+
+/// The tile layers' list follows the drawing order after a move that leaves the layers where
+/// they were, as after any other (map.tiles, the pop-ups and the AI Assistant read it).
+#[test]
+fn tile_layers_are_listed_in_drawing_order_after_a_move_in_place() {
+    let mut s = world();
+    // (`to` is the place among the other layers: the tile layer goes above the one there.)
+    for (i, (name, to)) in [("Over Countries", 3), ("Over Lakes", 2)].into_iter().enumerate() {
+        let url = format!("https://tiles{i}.example.org/{{z}}/{{x}}/{{y}}.png");
+        s.run("map.addTiles", &json!({"url": url, "name": name, "overlay": true})).unwrap();
+        s.run("map.setTiles", &json!({"name": name, "to": to})).unwrap();
+    }
+    // The list out of the drawing order (as a change to the groups, which re-seats the tile
+    // layers without sorting them, can leave it), then a layer placed where it is.
+    s.map_mut().tiles.reverse();
+    s.run("layer.group", &json!({"layer": "Countries", "group": null, "before": null})).unwrap();
+    let in_stack: Vec<String> = stack_names(&s).into_iter().filter_map(|n| n.strip_prefix('~').map(String::from)).collect();
+    let listed: Vec<String> = s.map().tiles.iter().map(|t| t.name.clone()).collect();
+    assert_eq!(listed, in_stack);
+}
+
+/// Two tile layers whose places merge in a move that leaves the layers where they are (a layer
+/// put in the group below it) keep the order they were drawn in, even with the list out of order
+/// before (as a change to the groups can leave it).
+#[test]
+fn tile_layers_keep_their_drawing_order_when_their_places_merge_in_place() {
+    let mut s = world();
+    for (i, (name, to)) in [("Over Rivers", 1), ("Over Lakes", 3)].into_iter().enumerate() {
+        let url = format!("https://tiles{i}.example.org/{{z}}/{{x}}/{{y}}.png");
+        s.run("map.addTiles", &json!({"url": url, "name": name, "overlay": true})).unwrap();
+        s.run("map.setTiles", &json!({"name": name, "to": to})).unwrap();
+    }
+    assert_eq!(stack_names(&s), ["Cities", "~Over Rivers", "Rivers", "~Over Lakes", "Lakes", "Countries"]);
+    s.run("group.add", &json!({"name": "Water", "layers": ["Lakes"]})).unwrap();
+    s.map_mut().tiles.reverse();
+    // Rivers joins the group, above Lakes, where it is: both tile layers now sit over it.
+    s.run("layer.group", &json!({"layer": "Rivers", "group": "Water", "before": "Lakes"})).unwrap();
+    assert_eq!(stack_names(&s), ["Cities", "~Over Rivers", "~Over Lakes", "Rivers", "Lakes", "Countries"]);
+}
+
+/// Layers sharing an id (a project may repeat one) are told apart by their places: a real move of
+/// one of them hands the tile layer over it on, as any move does.
+#[test]
+fn a_move_among_layers_sharing_an_id_still_hands_tile_layers_on() {
+    let mut s = world();
+    s.run("map.addTiles", &json!({"url": "https://wms.example.org/{z}/{x}/{y}.png", "name": "Depths", "overlay": true})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Depths", "to": 0})).unwrap();
+    assert_eq!(stack_names(&s), ["~Depths", "Cities", "Rivers", "Lakes", "Countries"]);
+    let m = s.map_mut();
+    let (x, lakes) = (m.layers[0].id, m.layers[2].id);
+    m.layers[1].id = x;
+    // Cities (the first with the id) goes above Lakes: the tile layer over it goes on to Lakes.
+    m.place_layer(x, None, Some(lakes)).unwrap();
+    assert_eq!(stack_names(&s), ["Rivers", "Cities", "~Depths", "Lakes", "Countries"]);
+}
+
+/// A tile layer over a group, after a move inside the group, stays over it when the group's
+/// bottom layer is taken out in place: its place is the group's top as it is, not the layer
+/// that was the top before the move.
+#[test]
+fn a_tile_layer_over_a_group_stays_when_its_bottom_layer_leaves_in_place() {
+    let mut s = world();
+    s.run("group.add", &json!({"name": "Water", "layers": ["Rivers", "Lakes"]})).unwrap();
+    s.run("map.addTiles", &json!({"url": "https://wms.example.org/{z}/{x}/{y}.png", "name": "Depths", "overlay": true})).unwrap();
+    s.run("map.setTiles", &json!({"name": "Depths", "to": 1})).unwrap();
+    assert_eq!(stack_names(&s), ["Cities", "~Depths", "Rivers", "Lakes", "Countries"]);
+    s.run("layer.move", &json!({"layer": "Lakes", "to": 1})).unwrap();
+    assert_eq!(stack_names(&s), ["Cities", "~Depths", "Lakes", "Rivers", "Countries"]);
+    s.run("layer.group", &json!({"layer": "Rivers", "group": null, "before": "Countries"})).unwrap();
+    assert_eq!(stack_names(&s), ["Cities", "~Depths", "Lakes", "Rivers", "Countries"]);
+}
+
 /// A tile layer added as data (an archive, a GeoTIFF read in place) goes on top as an overlay
 /// does, without being one.
 #[test]

@@ -1331,6 +1331,7 @@ impl Map {
                 return Err("the layer to go before isn't in the group".into());
             }
         }
+        let places = self.pin_tile_places();
         self.release_tiles(&[layer]);
         for g in &mut self.groups {
             g.children.retain(|c| *c != layer);
@@ -1348,10 +1349,13 @@ impl Map {
                 at -= 1;
             }
         }
-        self.layers.insert(at.min(self.layers.len()), l);
+        let at = at.min(self.layers.len());
+        self.layers.insert(at, l);
         if let Some(g) = group.and_then(|g| self.groups.iter_mut().find(|x| x.id == g)) {
             g.children.push(layer);
         }
+        // (Back where it was taken from: nothing moved.)
+        self.keep_tiles_if_unmoved(at == from, places);
         self.settle_tiles();
         Ok(())
     }
@@ -1360,6 +1364,11 @@ impl Map {
     /// the bottom); a position inside another group's run moves up above that group.
     pub fn move_group(&mut self, group: u32, to: usize) -> Result<(), String> {
         let children = self.group(group).ok_or("no such group")?.children.clone();
+        let places = self.pin_tile_places();
+        // Where the group's layers are now: put back at the start of their run, unbroken, they
+        // haven't moved.
+        let run: Vec<usize> = self.layers.iter().enumerate().filter(|(_, l)| children.contains(&l.id)).map(|(i, _)| i).collect();
+        let start = run.first().copied().filter(|s| run.iter().enumerate().all(|(k, i)| *i == s + k));
         self.release_tiles(&children);
         let (members, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.layers).into_iter().partition(|l| children.contains(&l.id));
         self.layers = rest;
@@ -1373,6 +1382,7 @@ impl Map {
         let tail = self.layers.split_off(at);
         self.layers.extend(members);
         self.layers.extend(tail);
+        self.keep_tiles_if_unmoved(start == Some(at), places);
         self.settle_tiles();
         Ok(())
     }
@@ -1584,6 +1594,39 @@ impl Map {
             t.over = layers.iter().skip(from).map(|l| l.id).find(|id| !moving.contains(id));
         }
         self.sort_tiles(0);
+    }
+
+    /// The tile layers in their drawing order and places, each pinned to the layer it is drawn over now
+    /// under the groups as they are (a move inside a group leaves `over` on a layer that is no
+    /// longer the group's top), as [`Map::release_tiles`] pins them, and sorted into the drawing
+    /// order (`self.tiles` itself, so tile layer indices may change, as `release_tiles` changes
+    /// them too). `None` when no tile layer has a place. Kept whole: a tile layer's `id` may be empty or shared, so it can't tell them
+    /// apart.
+    fn pin_tile_places(&mut self) -> Option<Vec<TileLayer>> {
+        if self.tiles.iter().all(|t| t.over.is_none()) {
+            return None;
+        }
+        self.pin_tiles();
+        // In the drawing order as it is, which a later merge of their places (a layer put in a
+        // group) keeps: the list may be out of it (a change to the groups re-seats tile layers
+        // without sorting them).
+        self.sort_tiles(0);
+        Some(self.tiles.clone())
+    }
+
+    /// Puts the tile layers back as `places` had them, in their drawing order, when the layers
+    /// were `unmoved`: put back where they were taken from (a layer placed on its own spot, a
+    /// group moved to where it is), told by their places, not their ids (which a project may
+    /// repeat). Such a move doesn't hand the tile layers over them to the layer below, as
+    /// [`Map::release_tiles`] did. A layer that only changed group (put in the group just above
+    /// it, say) keeps its tile layers too, and the caller's [`Map::settle_tiles`] then seats them
+    /// over that group's topmost layer, as [`Map::set_group`] does.
+    fn keep_tiles_if_unmoved(&mut self, unmoved: bool, places: Option<Vec<TileLayer>>) {
+        let Some(places) = places else { return };
+        if unmoved {
+            self.tiles = places;
+            self.sort_tiles(0);
+        }
     }
 
     /// After a change to the groups: each tile layer's place is a group's topmost layer, or
