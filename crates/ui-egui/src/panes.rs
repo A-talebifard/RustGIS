@@ -3413,6 +3413,8 @@ pub fn tool_icon(id: &str) -> &'static str {
         "clip" => "clip",
         "erase" => "erase",
         "intersect" => "intersect",
+        "identity" => "identity",
+        "union" => "union",
         "dissolve" => "dissolve",
         "convexHull" => "hull",
         "featureToPoint" => "centroid",
