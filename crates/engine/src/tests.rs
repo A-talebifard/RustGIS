@@ -149,6 +149,30 @@ fn table_remove_takes_a_standalone_table_out_of_the_project() {
 }
 
 #[test]
+fn a_saved_selection_is_read_in_range_in_order_and_once() {
+    // A selection edited by hand: a row repeated, out of order, and one past the layer's end.
+    let s = world();
+    let mut v: Value = serde_json::to_value(&s.project).unwrap();
+    let layers = v["maps"][0]["layers"].as_array_mut().unwrap();
+    let i = layers.iter().position(|l| l["name"] == "Countries").unwrap();
+    layers[i]["selection"] = json!([3, 1, 3, 1_000_000]);
+    let p = Project::from_json(&v.to_string()).unwrap();
+    let countries = p.map().layers.iter().find(|l| l.name == "Countries").unwrap();
+    assert_eq!(countries.selection, [1, 3]);
+    // An offline area's snapshot, edited the same way, opens with the selection put right too.
+    let mut s = world();
+    s.run("offline.download", &json!({"name": "Paris", "extent": [1.0, 48.0, 4.0, 50.0]})).unwrap();
+    let cities = s.project.offline_areas[0].data.layers.iter_mut().find(|l| l.name == "Cities").unwrap();
+    let last = cities.dataset.features.len() - 1;
+    cities.selection = vec![last, 0, last, last + 1];
+    s.run("offline.open", &json!({"name": "Paris"})).unwrap();
+    let mut want = vec![0, last];
+    // Row 0 and the last row, once each: one row when the layer has a single feature.
+    want.dedup();
+    assert_eq!(s.map().layer_by_name("Cities").unwrap().selection, want);
+}
+
+#[test]
 fn standalone_tables_keep_their_ids_in_the_project_file() {
     let mut s = world();
     for name in ["sites", "sites", "notes"] {
