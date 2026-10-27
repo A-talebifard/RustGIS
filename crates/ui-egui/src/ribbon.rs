@@ -2347,6 +2347,33 @@ fn edit_tab(app: &mut RustGisApp, ui: &mut Ui) {
             small(ui, app, "redo", "Redo", "Redo the change you undid.", "edit.redo", Value::Null, false);
             small(ui, app, "history", "Status", "Edits since the project was saved.", "ui.pane.editing", Value::Null, pane);
         });
+        // A layer loaded from PostGIS for editing saves its edits to its table, not the project
+        // (desktop only: the browser doesn't reach databases).
+        #[cfg(not(target_arch = "wasm32"))]
+        if app.session.map().layers.iter().any(|l| l.postgis.is_some()) {
+            col(ui, |ui| {
+                small(
+                    ui,
+                    app,
+                    "save",
+                    "Save to PostGIS…",
+                    "Save a PostGIS layer's edits to its table, unless rows changed there since.",
+                    "ui.dialog",
+                    json!({"name": "pgSave"}),
+                    false,
+                );
+                small(
+                    ui,
+                    app,
+                    "update",
+                    "Discard PostGIS Edits…",
+                    "Load a PostGIS layer's rows again as they are in the database, dropping its edits.",
+                    "ui.dialog",
+                    json!({"name": "pgDiscard"}),
+                    false,
+                );
+            });
+        }
         col(ui, |ui| {
             small(ui, app, "settings", "Settings", "Editing settings.", "ui.pane.editing", Value::Null, pane);
             small(

@@ -3858,6 +3858,8 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "share.webLayer",
     "share.webStyle",
     "share.locator",
+    "pg.saveEdits",
+    "pg.discardEdits",
     "zarr.reduce",
     "cube.trend",
     "cube.reduce",
