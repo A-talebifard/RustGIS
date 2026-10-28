@@ -374,12 +374,35 @@ NASA's data comes two ways: **NASA Earthdata…** adds imagery that NASA serves 
 (GIBS) in Web Mercator: more than a thousand layers of satellite imagery and science data (MODIS,
 VIIRS, Landsat, sea surface temperature, aerosols, fires…), grouped by mission or instrument (the
 first part of their names) and searched by words. Most layers change day by day: **Date**
-(YYYY-MM-DD) picks the day they are added at, and empty adds the service's default (its latest).
-The same layer can be added at several dates, each a layer named with its date. A WMTS layer with a time dimension works the same way in any service,
-and with commands `service.add` takes `"time"`:
+(YYYY-MM-DD) picks the day they are added at, and empty adds the service's default (its latest);
+**Follow the time slider** steps through the days with the time slider instead (see below).
+The same layer can be added at several dates, each a layer named with its date. A WMS or WMTS layer with a time dimension works the same way in any service:
+**Date** takes one of the times it lists (hover over its "map by date" to see them, and its default), and with commands `service.add` takes `"time"`:
 
 ```sh
 rustgis-cli run --cmd 'service.add={"url":"https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml","layer":"MODIS_Terra_CorrectedReflectance_TrueColor","time":"2024-06-01"}' --cmd 'share.exportMap={"path":"gibs.png"}'
+```
+
+A WMS layer is drawn at its time with `TIME` in its requests, its GetFeatureInfo ones too, as WMS 1.3.0
+(Annex C) and 1.1.1 define it: at the service's default, which may be an interval, unless another
+is asked for. Where the service lets a layer take several times at once (`multipleValues`), a list
+(`1990,2000`) or an interval (`1990/2020`, `1990/2020/P10Y`) can be asked for too; otherwise one
+time. swisstopo's national maps go back year by year to 1952, and its population counts to 1990:
+
+```sh
+rustgis-cli run --cmd 'service.add={"url":"https://wms.geo.admin.ch/?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0","layer":"ch.swisstopo.pixelkarte-farbe-pk25.noscale","time":"1960"}' --cmd 'map.goToXY={"lon":7.4474,"lat":46.948,"scale":25000}' --cmd 'share.exportMap={"path":"bern-1960.png"}'
+```
+
+**Follow the time slider** adds a WMS or WMTS layer with a time dimension on the
+[time slider](workspace.md) instead, at a date that changes with it: its
+requests take each step's time, written as the layer writes its times (`1995`, `19951231`,
+`2024-06-01`, `2026-08-31T23:59:59Z`). When the slider is off, it is turned on with the layer's
+times (the years of `1952/2026/P1Y`, or the times it lists), at the layer's default (or its
+latest); one already on keeps its steps, and a service that lists other times may draw nothing at
+some of them. With commands, `"time": "slider"` (or `true`), and `time.export` makes an animation:
+
+```sh
+rustgis-cli run --cmd 'service.add={"url":"https://wms.geo.admin.ch/?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0","layer":"ch.swisstopo.pixelkarte-farbe-pk25.noscale","time":"slider"}' --cmd 'map.goToXY={"lon":7.4474,"lat":46.948,"scale":25000}' --cmd 'time.set={"interval":15}' --cmd 'time.export={"path":"bern.gif"}'
 ```
 
 A service may name its time instead of dating it: swisstopo's layers on
