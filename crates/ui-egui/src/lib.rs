@@ -71,6 +71,7 @@ mod scriptcolor;
 mod scriptcomplete;
 mod searchbox;
 mod serviceui;
+mod shortcutui;
 mod showme;
 mod sourcespane;
 mod sqlbox;
@@ -576,6 +577,11 @@ pub struct UiState {
     pub shortcuts: bool,
     /// The keyboard shortcuts.
     pub keymap: keymap::Keymap,
+    pub(crate) shortcut_editor: shortcutui::Editor,
+    /// Preserve unreadable saved shortcuts until the user explicitly resets them.
+    pub(crate) shortcut_preferences_blocked: bool,
+    /// The shortcut changes are too many to save: they apply only to this session.
+    pub(crate) shortcut_preferences_full: bool,
     pub tab_strip_rect: Option<egui::Rect>,
     /// Where the left and right panes were drawn on the last frame, while they show.
     pub pane_rects: [Option<egui::Rect>; 2],
@@ -777,6 +783,9 @@ impl Default for UiState {
             about: false,
             shortcuts: false,
             keymap: keymap::Keymap::default(),
+            shortcut_editor: shortcutui::Editor::default(),
+            shortcut_preferences_blocked: false,
+            shortcut_preferences_full: false,
             tab_strip_rect: None,
             pane_rects: [None; 2],
             copy_out: None,
@@ -1042,6 +1051,7 @@ impl RustGisApp {
         // Both saved database passwords and S3 keys use the same store, installed before prefs.
         self.session.database_logins.set_store(services.secrets.clone());
         self.services = services;
+        shortcutui::load(&mut self);
         sourcespane::load_connections(&mut self);
         autosave::load(&mut self);
         if let Some(lang) = self.services.load_pref.as_ref().and_then(|load| load("language")) {
@@ -2248,6 +2258,7 @@ impl RustGisApp {
                 }
             }
             "ui.shortcuts" => self.ui.shortcuts = true,
+            "ui.customizeShortcuts" => self.ui.shortcut_editor.open = true,
             // Copy, cut and copy path also put their text on the system clipboard.
             "ui.copy" | "ui.cut" | "ui.copyPath" => {
                 let cmd = match id {
@@ -3884,6 +3895,7 @@ impl RustGisApp {
         update::show(self, &ctx);
         showme::tick(self, &ctx);
         chrome::command_search(self, &ctx);
+        shortcutui::show(self, &ctx);
         chrome::about(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         agentthreads::windows(self, &ctx);
