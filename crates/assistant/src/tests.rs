@@ -4181,3 +4181,21 @@ fn list_layers_includes_web_tile_layers() {
     let ctx = tools::context(&s);
     assert!(ctx.contains("characters in all)\" (index ") && ctx.contains("raster, overlay, over \"Cities\", hidden)"), "{ctx}");
 }
+
+/// Callback completion and a forged UI project-download request disclose their file reach.
+#[test]
+fn geolibre_download_callbacks_require_import_approval() {
+    let s = Session::new(rustgis_engine::project::Project::default());
+    for (command, params) in
+        [("layer.addDownload", json!({"id":1})), ("ui.addUrl", json!({"url":"https://example.org/map.geolibre","geolibreProject":true}))]
+    {
+        let call = ToolCall { id: "callback".into(), name: "run_command".into(), args: json!({"command":command,"params":params}) };
+        assert!(tools::gate(&s, &call).is_some(), "{command}");
+    }
+    for key in ["geolibreProject", "geolibreLayer", "geolibreZarr"] {
+        let mut params = json!({"url":"https://example.org/data"});
+        params[key] = json!(true);
+        let call = ToolCall { id: key.into(), name: "run_command".into(), args: json!({"command":"ui.addUrl","params":params}) };
+        assert!(tools::gate(&s, &call).is_some(), "{key}");
+    }
+}

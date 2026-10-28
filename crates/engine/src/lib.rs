@@ -915,7 +915,9 @@ impl Session {
     /// requests the next is refused rather than silently dropping one already promised.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if !self.url_requests.iter().any(|q| q.get("url").and_then(serde_json::Value::as_str) == Some(url.as_str())) {
+        if !self.url_requests.iter().any(|q| {
+            q.get("url").and_then(serde_json::Value::as_str) == Some(url.as_str()) && q.get("geolibreLayer") == p.get("geolibreLayer")
+        }) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
@@ -1021,6 +1023,12 @@ impl Session {
         }
         self.merge = merge;
         let res = self.guarded(label, mutates, |s| run(s, params));
+        if id == "layer.addDownload"
+            && res.is_ok()
+            && let Some(token) = params.get("geolibreLayer").and_then(|v| v.get("token")).and_then(serde_json::Value::as_str)
+        {
+            self.retire_import_history(token);
+        }
         // What was added, for the Data Sources pane's Recent list.
         if res.is_ok()
             && let Some(src) = sources::added_by(id, params)
@@ -1028,6 +1036,16 @@ impl Session {
             self.sources.note(src);
         }
         res
+    }
+
+    /// Retires only this consumed reservation, preserving unrelated pending imports in history.
+    pub(crate) fn retire_import_history(&mut self, token: &str) {
+        if token.is_empty() {
+            return;
+        }
+        for (project, ..) in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            project.discard_import_reservation(token);
+        }
     }
 
     /// Why a command can't run on `layer`: it edits features, and the layer is read in place from

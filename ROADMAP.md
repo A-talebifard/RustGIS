@@ -98,9 +98,9 @@ And alongside it:
 ### Data at the source
 - Write edits back to GeoPackage and PostGIS (edits stay in the project today). _Coordinate
   first._
-- Open GeoLibre `.geolibre` projects as maps, the way supported QGIS projects open
-  ([#962](https://github.com/opengeos/RustGIS/issues/962)). GeoLibre opening
-  `.rgis` projects comes later, once RustGIS's project format and supported data types settle.
+- GeoLibre opening RustGIS `.rgis` projects, once RustGIS's project format and supported
+  data types settle. RustGIS imports GeoLibre projects; combined colour and size rendering
+  is tracked in [#1017](https://github.com/opengeos/RustGIS/issues/1017).
 - A date and date-time field type, read and written as dates (they are text today)
   ([#853](https://github.com/opengeos/RustGIS/issues/853)). _Coordinate first_ (it changes
   `FieldType`).
@@ -186,8 +186,8 @@ Open questions rather than plans; discuss before building.
   standalone tables; geotagged photos and KML ground overlays; geocoding (Find Place, address
   tables); a Data Sources pane (favourites, recent, saved services, a library, reusable
   connections and dataset browsing) and an SQL pane (DuckDB Spatial); layer, map, style,
-  template, task and package files; supported QGIS `.qgs`/`.qgz` projects opened as maps, with
-  layer styles.
+  template, task and package files; supported QGIS `.qgs`/`.qgz` and GeoLibre `.geolibre` projects opened as maps,
+  with supported layer styles and notes on import differences.
 - Open data: STAC search (Planetary Computer assets), NASA Earthdata (desktop), Hugging Face,
   Overture Maps, Source Cooperative, OpenStreetMap by area (Overpass), geoBoundaries, CKAN,
   Socrata and ArcGIS Hub portals, and S3 buckets with signed connections and a bucket browser.

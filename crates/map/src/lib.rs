@@ -7,6 +7,7 @@ pub mod color;
 pub mod design;
 pub mod effects;
 pub mod fills;
+pub mod geolibre;
 pub mod globe;
 pub mod graphics;
 pub mod layout;

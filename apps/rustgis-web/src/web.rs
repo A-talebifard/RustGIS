@@ -158,9 +158,9 @@ pub fn start() {
                             None => log::warn!("?lang={code}: no such interface language; following the browser's"),
                         }
                     }
-                    // `?project=<url>` opens a project (`.rgis`) by its web address: a whole map,
-                    // its layers, symbology and view, shared as one link. It replaces the project
-                    // when it lands, so the links that add to a project are left out beside it.
+                    // `?project=<url>` opens a native project or imports a GeoLibre map asynchronously.
+                    // Keep this startup path exclusive: other links could otherwise add data
+                    // to different maps depending on when the import completes.
                     if let Some(url) = &project {
                         if let Err(e) = app.run("ui.openUrl", serde_json::json!({"url": url})) {
                             app.session.notify(format!("?project={url}: {e}"), true);
@@ -169,7 +169,13 @@ pub fn start() {
                             ["data", "stac", "style", "tiles", "zarr"].into_iter().filter(|k| !params(&q, k, 1).is_empty()).collect();
                         if !skipped.is_empty() {
                             let list = skipped.iter().map(|k| format!("?{k}=")).collect::<Vec<_>>().join(", ");
-                            app.session.notify(format!("?project= opens a whole project, so {list} links were left out"), false);
+                            app.session.notify(
+                                rustgis_ui_egui::i18n::fmt(
+                                    "?project= opens a project or imports a map, so {list} links were left out",
+                                    &[("list", &list)],
+                                ),
+                                false,
+                            );
                         }
                     }
                     let links = if project.is_some() { "" } else { q.as_str() };
@@ -899,7 +905,10 @@ fn services(inbox: Inbox, font_inbox: Inbox, notes: Notes, ctx: egui::Context, e
             } else if purpose == "shapefile" {
                 rfd::AsyncFileDialog::new().add_filter("Shapefile", &["shp", "dbf", "shx", "prj", "cpg", "zip"])
             } else if purpose == "project" {
-                rfd::AsyncFileDialog::new().add_filter("RustGIS project", &["rgis", "rgisx", "rgispkg"])
+                rfd::AsyncFileDialog::new().add_filter(
+                    rustgis_ui_egui::tl!("Projects and JSON data (RustGIS, GeoLibre)"),
+                    &["rgis", "rgisx", "rgispkg", "geolibre", "json"],
+                )
             } else if purpose == "qgisProject" {
                 rfd::AsyncFileDialog::new().add_filter(rustgis_ui_egui::tl!("QGIS project"), &["qgs", "qgz"])
             } else if purpose == "item" {
