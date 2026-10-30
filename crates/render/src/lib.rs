@@ -4377,12 +4377,21 @@ pub struct TiltPatch {
 /// fraction of its size) on every side so the view can move a little before they no longer
 /// cover it, and at most `max_side` pixels a side (coarser beyond that). The map view lays them
 /// over the tilted ground as meshes while it moves, with no drawing per frame. Labels are left
-/// out (the view keeps the last frame's while it moves).
+/// out (the view keeps the last frame's while it moves). A flat view turned to a bearing is one
+/// band, square, over the circle round the view and without the margin: it is laid over the view
+/// the same way while it turns.
 pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32) -> Vec<TiltPatch> {
     let ppp = if view.pixels_per_point.is_finite() { view.pixels_per_point.clamp(0.25, 4.0) } else { 1.0 };
-    let margin = if margin.is_finite() { margin.clamp(0.0, 2.0) } else { 0.0 };
     let max_side = f64::from(max_side.clamp(64, 8192));
-    let bands = view.camera.tilt_bands(view.width, view.height);
+    let cam = view.camera;
+    let turned = turned_band(view);
+    // A flat turned view moves on its band only as it turns: no room for panning, whose picture
+    // a service drawing one picture of the view would be asked for again, larger.
+    let margin = if margin.is_finite() && turned.is_none() { margin.clamp(0.0, 2.0) } else { 0.0 };
+    let bands = match turned {
+        Some(band) => vec![band],
+        None => cam.tilt_bands(view.width, view.height),
+    };
     sync_tilted(map, view, &bands, false);
     let (display, lock) = (map.label_display, map.label_lock.take());
     map.label_display.paused = true;
@@ -4390,10 +4399,12 @@ pub fn render_tilt_drape(map: &mut Map, view: &View, margin: f64, max_side: u32)
     for b in bands {
         let (mut w, mut h) = (b.width * (1.0 + 2.0 * margin), b.height * (1.0 + 2.0 * margin));
         let mut camera = b.camera;
-        // Coarser to fit the size limit.
+        // Coarser to fit the size limit, its pixels whole: as coarse again as the rounding takes,
+        // so it still reaches as far (a turned band has a point to spare).
         let k = (w.max(h) * ppp / max_side).max(1.0);
-        camera.res *= k;
-        (w, h) = ((w / k).floor().max(1.0), (h / k).floor().max(1.0));
+        let (fw, fh) = ((w / k).floor().max(1.0), (h / k).floor().max(1.0));
+        camera.res *= (w / fw).max(h / fh);
+        (w, h) = (fw, fh);
         let v = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
         // The bands share the read above.
         if let Some(RenderOutput::Cpu(r)) = render_frame(map, &v, false, Backend::Cpu, Labels::Shared) {
@@ -4440,6 +4451,23 @@ fn tilt_candidate(mut c: Candidate, at: &impl Fn(f32, f32) -> Option<(f32, f32)>
     }
     c.alternatives = spots.collect();
     Some(c)
+}
+
+/// The one band a flat view turned to a bearing is draped on: facing north, square over the
+/// circle round the view, so turning it stays on the band (its tiles and pictures the same at
+/// every bearing). `None` for a view north up or tilted.
+pub fn turned_band(view: &View) -> Option<rustgis_map::camera::Band> {
+    let cam = view.camera;
+    (cam.pitch == 0.0 && cam.bearing != 0.0).then(|| {
+        let side = view.width.hypot(view.height) + 2.0;
+        rustgis_map::camera::Band { camera: Camera { bearing: 0.0, ..cam }, width: side, height: side, depth: (1.0, 1.0) }
+    })
+}
+
+/// Turns `l` as `turn_with` does, for a label drawn in one view shown in another (a moving
+/// map's labels laid over its drape): its place is left as it is.
+pub fn turn_label(l: &mut PlacedLabel, at: &impl Fn(f32, f32) -> Option<(f32, f32)>) {
+    turn_with(l, at);
 }
 
 /// Turns a label turned with the map (and its icon) as `at` moves it into another view (a
