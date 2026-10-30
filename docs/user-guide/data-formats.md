@@ -261,11 +261,15 @@ it's given `"singleImage": false` or a `"tileSize"`.
   to draw leaves the layer drawn in tiles there.
 - Nothing is asked for zoomed out past the layer's scale range or outside its bounds, and closer
   in than its finest zoom its picture there is stretched, as its tiles are.
-- It is drawn so on a flat map, north up or turned, in Web Mercator or in a
-  [projection the service offers](#services-in-other-coordinate-systems). On the globe, a tilted
-  map, a projection the service doesn't offer, or a Web Mercator view across or near the
-  antimeridian (whose picture, a little larger than the view, would cross it; tiles wrap), the
-  layer is drawn in tiles. Exports and layouts ask for their own picture.
+- It is drawn so on a flat map, north up or turned, in Web Mercator or in a projection with an
+  EPSG code. The picture is asked for in the map's own system when the service offers it (a
+  map service's export takes any: the service projects it); otherwise in one it does offer
+  (Web Mercator, or the WMS layer's [own system](#services-in-other-coordinate-systems)), and
+  warped into place piece by piece. On the globe, a tilted map, a projection without an EPSG
+  code (the presets), or a Web Mercator or longitude/latitude picture across or near the
+  antimeridian (a little larger than the view, it would cross it; tiles wrap), the layer is
+  drawn in tiles. Exports
+  and layouts ask for their own picture.
 
 Right-click the layer in the Layers pane, **Draw as**, to switch to **Tiles** and back to
 **Single image** (`map.setTiles` with `"singleImage"`). A layer asked for in Web Mercator takes
@@ -281,7 +285,9 @@ WMS layer offered in any system with an EPSG code that RustGIS can transform (or
 WMTS layer whose tile matrix set is in one, is listed and added like any other (#769):
 
 - **On a Web Mercator map**, a layer the service offers in Web Mercator is asked for in it, as
-  before. Otherwise each of the map's tiles is made from what the service gives for its area in the
+  before. Otherwise a WMS layer drawn as [one picture of the view](#one-picture-of-the-view-or-tiles)
+  is asked for one picture in its own system, warped into place; drawn as tiles (and a WMTS
+  layer), each of the map's tiles is made from what the service gives for its area in the
   layer's own system, warped into place on your computer: one GetMap image, or the tiles of the
   WMTS matrix nearest the map's detail (a coarser one where that would take more than 16 tiles;
   of a set of more than 40 matrices, its 20 coarsest and 20 finest are kept). A WMS layer is
