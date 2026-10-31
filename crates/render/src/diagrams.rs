@@ -15,9 +15,20 @@ use crate::paint;
 /// Draws the diagram `d` for one feature at device pixel (`x`, `y`), whose category values
 /// `values` sum to `total` ([`DiagramSettings::values`]): a pie's slices clockwise from its
 /// start angle, or bars rising from a baseline, each category's share of the total. With
-/// `opacity`, the layer's transparency; `ppp`, pixels per point.
+/// `opacity`, the layer's transparency; `ppp`, pixels per point; `paused`, that the label
+/// display is paused, which draws no value labels.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn draw(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rgba)], total: f64, opacity: f32, ppp: f32) {
+pub(crate) fn draw(
+    pm: &mut Pixmap,
+    x: f32,
+    y: f32,
+    d: &DiagramSettings,
+    values: &[(f64, Rgba)],
+    total: f64,
+    opacity: f32,
+    ppp: f32,
+    paused: bool,
+) {
     if !(x.is_finite() && y.is_finite()) || values.is_empty() || total <= 0.0 {
         return;
     }
@@ -26,19 +37,20 @@ pub(crate) fn draw(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values:
         return;
     }
     match d.kind {
-        rustgis_map::DiagramKind::Pie => pie(pm, x, y, d, values, total, size, opacity, ppp),
-        rustgis_map::DiagramKind::Bar => bars(pm, x, y, d, values, total, size, opacity, ppp),
+        rustgis_map::DiagramKind::Pie => pie(pm, x, y, d, values, total, size, opacity, ppp, paused),
+        rustgis_map::DiagramKind::Bar => bars(pm, x, y, d, values, total, size, opacity, ppp, paused),
     }
 }
 
 /// How far from its anchor any feature's diagram reaches, in points (for culling): the largest
-/// size its settings draw, plus what a value label takes when labels are on.
+/// size its settings draw, plus what a value label takes when labels are on. A label is centred 7
+/// points past the crust and runs about 25 points to either side (`52K (52%)`), so 40 reaches it.
 pub(crate) fn reach(d: &DiagramSettings) -> f32 {
-    d.max_size() + if d.labels.is_none() { 0.0 } else { 16.0 }
+    d.max_size() + if d.labels.is_none() { 0.0 } else { 40.0 }
 }
 
 /// Where a feature's diagram sits: the point itself, a line's middle, or a polygon's interior
-/// centre (the centroid of its largest exterior ring).
+/// point ([`interior`]).
 pub(crate) fn anchor(g: &Geometry) -> Option<Coord> {
     match g {
         Geometry::Point(c) => Some(*c),
@@ -58,16 +70,55 @@ pub(crate) fn anchor(g: &Geometry) -> Option<Coord> {
             })
         }
         Geometry::Polygon(polys) => {
-            let ring = polys.iter().filter_map(|rings| rings.first()).max_by(|a, b| area(a).abs().total_cmp(&area(b).abs()))?;
-            centroid(ring)
+            // The polygon with the largest exterior ring, and the ring that makes it.
+            let rings = polys
+                .iter()
+                .filter_map(|rings| rings.first().map(|ring| (rings, ring)))
+                .max_by(|a, b| area(a.1).abs().total_cmp(&area(b.1).abs()))
+                .map(|(rings, _)| rings)?;
+            interior(rings)
         }
     }
+}
+
+/// A point inside a polygon, given its rings (the exterior first, then any holes): the centroid
+/// of the exterior when that lies inside, else the middle of the widest run of the polygon across
+/// the centroid's height. The runs are found by an even-odd scan, so a hole splits them.
+fn interior(rings: &[Vec<Coord>]) -> Option<Coord> {
+    let c = centroid(rings.first()?)?;
+    let mut xs: Vec<f64> = Vec::new();
+    for ring in rings {
+        let n = ring.len();
+        for i in 0..n {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            if (p.y <= c.y) != (q.y <= c.y) {
+                xs.push(p.x + (c.y - p.y) * (q.x - p.x) / (q.y - p.y));
+            }
+        }
+    }
+    xs.sort_by(f64::total_cmp);
+    let runs: Vec<(f64, f64)> = xs.chunks_exact(2).map(|s| (s[0], s[1])).collect();
+    if runs.iter().any(|(a, b)| *a <= c.x && c.x <= *b) {
+        return Some(c);
+    }
+    runs.into_iter().max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0))).map(|(a, b)| Coord::new((a + b) / 2.0, c.y)).or(Some(c))
 }
 
 /// A pie at (`x`, `y`) of radius `size` pixels: its background disc, then a slice per category,
 /// each clockwise from `start_angle` (degrees from north) by its share of `total`, each outlined.
 #[allow(clippy::too_many_arguments)]
-fn pie(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rgba)], total: f64, size: f32, opacity: f32, ppp: f32) {
+fn pie(
+    pm: &mut Pixmap,
+    x: f32,
+    y: f32,
+    d: &DiagramSettings,
+    values: &[(f64, Rgba)],
+    total: f64,
+    size: f32,
+    opacity: f32,
+    ppp: f32,
+    paused: bool,
+) {
     if let Some(bg) = d.background.filter(|c| c.a() > 0)
         && let Some(p) = disc(x, y, size)
     {
@@ -87,7 +138,7 @@ fn pie(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rgb
             stroke(pm, &p, d.stroke, d.stroke_width, opacity, ppp);
         }
         // The label sits on the slice's mid-angle, just outside the crust.
-        if d.labels != DiagramLabel::None {
+        if !paused && d.labels != DiagramLabel::None {
             let mid = (from + to) / 2.0 * std::f32::consts::PI / 180.0;
             let (dx, dy) = (mid.sin(), -mid.cos());
             let (lx, ly) = (x + dx * (size + 7.0 * ppp), y + dy * (size + 7.0 * ppp));
@@ -100,7 +151,18 @@ fn pie(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rgb
 /// Bars at (`x`, `y`), `size` pixels high (a category's full share): a bar per category rising
 /// from a baseline under the anchor, the chart as wide as a bar each plus a gap, outlined as one.
 #[allow(clippy::too_many_arguments)]
-fn bars(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rgba)], total: f64, size: f32, opacity: f32, ppp: f32) {
+fn bars(
+    pm: &mut Pixmap,
+    x: f32,
+    y: f32,
+    d: &DiagramSettings,
+    values: &[(f64, Rgba)],
+    total: f64,
+    size: f32,
+    opacity: f32,
+    ppp: f32,
+    paused: bool,
+) {
     let n = values.len();
     let (bar, gap) = (size / n as f32, size / 16.0);
     let (w, baseline) = (bar * n as f32 + gap * (n as f32 - 1.0), y + size / 2.0);
@@ -110,21 +172,24 @@ fn bars(pm: &mut Pixmap, x: f32, y: f32, d: &DiagramSettings, values: &[(f64, Rg
         rect(&mut pb, left - gap, baseline - size - gap, w + 2.0 * gap, size + 2.0 * gap);
         if let Some(p) = pb.finish() {
             pm.fill_path(&p, &paint(bg, opacity), FillRule::Winding, Transform::identity(), None);
+            stroke(pm, &p, d.stroke, d.stroke_width, opacity, ppp);
         }
     }
     let mut at = left;
     for (v, colour) in values {
         let h = (v / total) as f32 * size;
-        if h > 0.0 && colour.a() > 0 {
+        if h > 0.0 {
             let mut pb = PathBuilder::new();
             rect(&mut pb, at, baseline - h, bar, h);
             if let Some(p) = pb.finish() {
-                pm.fill_path(&p, &paint(*colour, opacity), FillRule::Winding, Transform::identity(), None);
+                if colour.a() > 0 {
+                    pm.fill_path(&p, &paint(*colour, opacity), FillRule::Winding, Transform::identity(), None);
+                }
                 stroke(pm, &p, d.stroke, d.stroke_width, opacity, ppp);
             }
         }
         // The label sits above the bar's top, on the bar's centre line.
-        if d.labels != DiagramLabel::None {
+        if !paused && d.labels != DiagramLabel::None {
             label_at(pm, at + bar / 2.0, baseline - h - 4.0 * ppp, d.labels, *v, total, ppp);
         }
         at += bar + gap;
@@ -286,7 +351,7 @@ mod tests {
     fn a_pie_paints_its_centre_and_leaves_the_corners() {
         let mut pm = Pixmap::new(64, 64).unwrap();
         let d = settings(DiagramKind::Pie);
-        draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0);
+        draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
         assert!(painted(&pm, 32, 32));
         assert!(!painted(&pm, 0, 0));
     }
@@ -296,7 +361,7 @@ mod tests {
         let mut pm = Pixmap::new(64, 64).unwrap();
         let d = settings(DiagramKind::Bar);
         // The baseline sits half a size below the anchor; the first bar covers x 21..31 of it.
-        draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0);
+        draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
         assert!(painted(&pm, 28, 40));
         assert!(!painted(&pm, 28, 20));
         assert!(!painted(&pm, 0, 0));
@@ -306,7 +371,7 @@ mod tests {
     fn nothing_is_drawn_without_a_positive_total() {
         let mut pm = Pixmap::new(64, 64).unwrap();
         let d = settings(DiagramKind::Pie);
-        draw(&mut pm, 32.0, 32.0, &d, &[(0.0, CATEGORY_COLORS[0])], 0.0, 1.0, 1.0);
+        draw(&mut pm, 32.0, 32.0, &d, &[(0.0, CATEGORY_COLORS[0])], 0.0, 1.0, 1.0, false);
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
     }
 
@@ -314,7 +379,7 @@ mod tests {
     fn a_percent_label_draws_just_outside_the_pie() {
         let mut pm = Pixmap::new(96, 96).unwrap();
         let d = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
-        draw(&mut pm, 48.0, 48.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0);
+        draw(&mut pm, 48.0, 48.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
         // The pie reaches 20 px; each label sits just past its crust, so pixels outside that
         // radius are painted where without labels nothing is.
         let outside = pm.pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
@@ -322,6 +387,17 @@ mod tests {
             (dx * dx + dy * dy) > 21.0 * 21.0
         });
         assert!(outside, "a label should draw just past the crust");
+    }
+
+    #[test]
+    fn a_paused_label_display_draws_no_value_labels() {
+        let values = [(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])];
+        let labelled = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
+        let mut paused = Pixmap::new(96, 96).unwrap();
+        draw(&mut paused, 48.0, 48.0, &labelled, &values, 100_000.0, 1.0, 1.0, true);
+        let mut bare = Pixmap::new(96, 96).unwrap();
+        draw(&mut bare, 48.0, 48.0, &settings(DiagramKind::Pie), &values, 100_000.0, 1.0, 1.0, false);
+        assert!(paused.data() == bare.data(), "the chart draws as it would with no labels");
     }
 
     #[test]
@@ -338,6 +414,26 @@ mod tests {
         assert!(
             anchor(&Geometry::Line(vec![vec![Coord::new(0.0, 0.0), Coord::new(2.0, 0.0), Coord::new(4.0, 0.0)]]))
                 .is_some_and(|c| (c.x - 2.0).abs() < 1e-9)
+        );
+    }
+
+    #[test]
+    fn a_concave_polygon_anchors_inside_itself() {
+        // A U: its centroid (1.5, 1.36) lies in the gap between the arms, outside the shape.
+        let u = Geometry::Polygon(vec![vec![vec![
+            Coord::new(0.0, 0.0),
+            Coord::new(3.0, 0.0),
+            Coord::new(3.0, 3.0),
+            Coord::new(2.0, 3.0),
+            Coord::new(2.0, 1.0),
+            Coord::new(1.0, 1.0),
+            Coord::new(1.0, 3.0),
+            Coord::new(0.0, 3.0),
+            Coord::new(0.0, 0.0),
+        ]]]);
+        assert!(
+            anchor(&u).is_some_and(|c| c.y > 1.0 && (c.x < 1.0 || c.x > 2.0)),
+            "the point sits in one of the arms, not the gap"
         );
     }
 }

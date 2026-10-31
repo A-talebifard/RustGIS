@@ -70,10 +70,15 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     }
     let size = match p.get("size") {
         None | Some(Value::Null) => Asked::Scaled(6.0, 40.0),
-        Some(v @ Value::Object(_)) => Asked::Scaled(
-            v.get("from").and_then(Value::as_f64).filter(|x| x.is_finite()).unwrap_or(6.0) as f32,
-            v.get("to").and_then(Value::as_f64).filter(|x| x.is_finite()).unwrap_or(40.0) as f32,
-        ),
+        Some(v @ Value::Object(_)) => {
+            // A bound given must be a number (or a numeric string, as `f` reads them): a bad one is
+            // an error, not the default.
+            let bound = |key: &str, default: f32| match v.get(key) {
+                None | Some(Value::Null) => Ok(default),
+                Some(_) => f(v, key).map(|x| x as f32).ok_or("size's from and to are points"),
+            };
+            Asked::Scaled(bound("from", 6.0)?, bound("to", 40.0)?)
+        }
         Some(_) => Asked::Fixed(
             f(p, "size")
                 .filter(|v| *v >= f64::from(MIN_SIZE) && *v <= f64::from(MAX_SIZE))
@@ -81,7 +86,10 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
                 as f32,
         ),
     };
-    let start_angle = f(p, "startAngle").filter(|a| a.is_finite()).map(|a| a.rem_euclid(360.0) as f32).unwrap_or(0.0);
+    let start_angle = match p.get("startAngle") {
+        None | Some(Value::Null) => 0.0,
+        Some(_) => f(p, "startAngle").ok_or("startAngle is degrees")?.rem_euclid(360.0) as f32,
+    };
     let background = match p.get("background") {
         None | Some(Value::Null) => None,
         Some(Value::String(c)) => Some(Rgba::from_hex(c).ok_or("background must be #RRGGBB or #RRGGBBAA")?),
@@ -95,7 +103,10 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
                 Some(Value::String(c)) => Rgba::from_hex(c).ok_or("outline's color must be #RRGGBB or #RRGGBBAA")?,
                 Some(_) => return Err("outline's color must be #RRGGBB or #RRGGBBAA".into()),
             },
-            v.get("width").and_then(Value::as_f64).filter(|w| w.is_finite() && *w >= 0.0).map(|w| w as f32).unwrap_or(0.75),
+            match v.get("width") {
+                None | Some(Value::Null) => DiagramSettings::default_stroke_width(),
+                Some(_) => f(v, "width").filter(|w| *w >= 0.0).ok_or("outline's width is points, zero or more")? as f32,
+            },
         ),
         Some(_) => return Err("outline is {\"color\"?, \"width\"?: points}".into()),
     };
@@ -106,6 +117,11 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     }
     if matches!(l.dataset.geometry_type, GeometryType::None) {
         return Err("this works on layers with geometry".into());
+    }
+    // A streamed layer holds the features of the view only, so a range of sums taken from them
+    // would be the view's, not the layer's: it needs the whole layer loaded, or a fixed size.
+    if l.is_streamed() && matches!(size, Asked::Scaled(..)) {
+        return Err("a size scaled by the sum needs all of a streamed layer: layer.loadAll first, or a fixed size".into());
     }
     // Every field must be there, and hold numbers.
     for (field, _) in &asked {
@@ -119,14 +135,14 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         .enumerate()
         .map(|(i, (field, colour))| DiagramCategory { field, colour: colour.unwrap_or(CATEGORY_COLORS[i % CATEGORY_COLORS.len()]) })
         .collect();
-    // A scaled size ranges over the sums of the features that have any (kept in the settings, as
-    // Proportional keeps its range); without any, the neutral range, which draws mid-size.
     // What each slice or bar says beside it: "none" (the default), "value", "percent" or "both".
     let labels = match p.get("labels") {
         None | Some(Value::Null) => DiagramLabel::None,
         Some(Value::String(code)) => DiagramLabel::from_code(code).ok_or("labels is \"none\", \"value\", \"percent\" or \"both\"")?,
         Some(_) => return Err("labels is \"none\", \"value\", \"percent\" or \"both\"".into()),
     };
+    // A scaled size ranges over the sums of the features that have any (kept in the settings, as
+    // Proportional keeps its range); without any, the neutral range, which draws mid-size.
     let size = match size {
         Asked::Fixed(s) => DiagramSize::Fixed(s),
         Asked::Scaled(min_size, max_size) => {
@@ -251,5 +267,21 @@ mod tests {
         assert!(s.map().layer(id).unwrap().diagram.is_none());
         assert!(s.undo());
         assert!(s.map().layer(id).unwrap().diagram.is_some(), "the clear is undone");
+    }
+
+    #[test]
+    fn a_malformed_number_is_refused_and_a_numeric_string_is_read() {
+        let (mut s, id) = regions();
+        let base = json!({"kind": "pie", "fields": ["pop_male"]});
+        for (key, value) in [("size", json!({"from": "north"})), ("startAngle", json!("north")), ("outline", json!({"width": "thick"}))] {
+            let mut p = base.clone();
+            p[key] = value;
+            assert!(s.run("layer.diagram", &p).is_err(), "{key} is refused, not replaced by its default");
+        }
+        assert!(s.map().layer(id).unwrap().diagram.is_none(), "refused, so unset");
+        // A numeric string is a number, as the other numbers of a command are read.
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": {"from": "18", "to": 40}})).unwrap();
+        let d = s.map().layer(id).unwrap().diagram.clone().expect("set");
+        assert!(matches!(d.size, DiagramSize::Scaled { min_size, .. } if min_size == 18.0));
     }
 }

@@ -4088,6 +4088,10 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     use rustgis_engine::map::diagram::{CATEGORY_COLORS, MAX_CATEGORIES};
     use rustgis_engine::map::{DiagramKind, DiagramLabel, DiagramSize};
 
+    // A table has no features to draw a chart on.
+    if l.geometry_type() == GeometryType::None {
+        return;
+    }
     // The layer.diagram call for `cats` with the rest of `d`'s own settings.
     let apply = |app: &mut RustGisApp, d: &rustgis_engine::map::DiagramSettings, cats: Vec<Value>| {
         let fields: Vec<Value> = cats.into_iter().map(|c| json!({"field": c["field"], "color": c["color"]})).collect();
@@ -4121,11 +4125,15 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             return;
         }
         ui.horizontal(|ui| {
-            if ui.button(tl!("Pie Chart")).clicked() {
-                let _ = app.run("layer.diagram", json!({"kind": "pie", "fields": [numeric[0], numeric[1]]}));
+            if ui.button(tl!("Pie Chart")).clicked()
+                && let Err(error) = app.run("layer.diagram", json!({"kind": "pie", "fields": [numeric[0], numeric[1]]}))
+            {
+                app.session.notify(error, true);
             }
-            if ui.button(tl!("Bar Chart")).clicked() {
-                let _ = app.run("layer.diagram", json!({"kind": "bar", "fields": [numeric[0], numeric[1]]}));
+            if ui.button(tl!("Bar Chart")).clicked()
+                && let Err(error) = app.run("layer.diagram", json!({"kind": "bar", "fields": [numeric[0], numeric[1]]}))
+            {
+                app.session.notify(error, true);
             }
         });
         return;
@@ -4156,11 +4164,17 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
                     }
                 }
             });
-            let mut colour = crate::theme::c32(c.colour);
+            // Built from the stored channels: a fully transparent colour keeps its colour, which a Color32 would lose.
+            let mut hsva = egui::ecolor::Hsva::from_srgb([c.colour.r(), c.colour.g(), c.colour.b()]);
+            hsva.a = f32::from(c.colour.a()) / 255.0;
+            let alpha = hsva.a;
             let mut cats: Vec<Value> = d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect();
             let mut changed = false;
-            if crate::widgets::color_button(ui, &mut colour).changed() {
-                cats[i]["color"] = json!(crate::theme::rgba(colour).hex());
+            if egui::color_picker::color_edit_button_hsva(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend).changed() {
+                let rgb = rustgis_engine::map::Rgba(hsva.to_srgba_unmultiplied());
+                // An opacity-only edit keeps the category's own channels, which the picker's rounding would change.
+                let picked = if hsva.a != alpha { c.colour.with_alpha(rgb.a()) } else { rgb };
+                cats[i]["color"] = json!(picked.hex());
                 changed = true;
             }
             if field != c.field {
@@ -4212,18 +4226,15 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         let mut changed = false;
         match d.size {
             DiagramSize::Fixed(mut s) => {
-                if ui.add(egui::DragValue::new(&mut s).range(1.0..=200.0).suffix(" pt")).changed() {
+                if held_drag(ui, egui::Id::new(("diagram-size", l.id)), &mut s, 1.0..=200.0, " pt", None) {
                     d.size = DiagramSize::Fixed(s);
                     changed = true;
                 }
             }
             DiagramSize::Scaled { ref mut min_size, ref mut max_size, .. } => {
-                if ui.add(egui::DragValue::new(min_size).range(1.0..=200.0).suffix(" pt")).changed() {
-                    changed = true;
-                }
-                if ui.add(egui::DragValue::new(max_size).range(1.0..=200.0).suffix(" pt")).changed() {
-                    changed = true;
-                }
+                let lo = held_drag(ui, egui::Id::new(("diagram-size-min", l.id)), min_size, 1.0..=200.0, " pt", None);
+                let hi = held_drag(ui, egui::Id::new(("diagram-size-max", l.id)), max_size, 1.0..=200.0, " pt", None);
+                changed = lo || hi;
             }
         }
         if changed {
@@ -4236,7 +4247,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         ui.horizontal(|ui| {
             let mut a = d.start_angle;
             let input_label = ui.label(tl!("Start angle"));
-            if ui.add(egui::DragValue::new(&mut a).range(0.0..=360.0).suffix("°")).labelled_by(input_label.id).changed() {
+            if held_drag(ui, egui::Id::new(("diagram-start-angle", l.id)), &mut a, 0.0..=360.0, "°", Some(input_label.id)) {
                 d.start_angle = a;
                 apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
             }
@@ -4286,7 +4297,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             d.stroke = crate::theme::rgba(colour);
         }
         let mut w = d.stroke_width;
-        if ui.add(egui::DragValue::new(&mut w).range(0.0..=8.0).suffix(" pt")).changed() {
+        if held_drag(ui, egui::Id::new(("diagram-outline-width", l.id)), &mut w, 0.0..=8.0, " pt", None) {
             d.stroke_width = w;
             changed = true;
         }
@@ -4294,6 +4305,27 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
         }
     });
+}
+
+/// A number dragged or typed in the Diagram section. It is held in the UI's memory while the drag
+/// goes on, and `true` once the drag stops or the field is left, when the number is applied: so a
+/// drag is one undo step, as [`manual_breaks`] holds its bounds. `v` shows the held number.
+fn held_drag(ui: &mut Ui, id: egui::Id, v: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str, label: Option<egui::Id>) -> bool {
+    if let Some(held) = ui.data(|d| d.get_temp::<f32>(id)) {
+        *v = held;
+    }
+    let mut r = ui.add(egui::DragValue::new(v).range(range).suffix(suffix));
+    if let Some(label) = label {
+        r = r.labelled_by(label);
+    }
+    if r.changed() {
+        ui.data_mut(|d| d.insert_temp(id, *v));
+    }
+    let done = (r.drag_stopped() || r.lost_focus()) && ui.data(|d| d.get_temp::<f32>(id)).is_some();
+    if done {
+        ui.data_mut(|d| d.remove_temp::<f32>(id));
+    }
+    done
 }
 
 /// The scales the Reference scale picker offers, besides none and the map's own.

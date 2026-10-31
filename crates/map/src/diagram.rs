@@ -9,7 +9,7 @@
 //! always in range, and read from a project through [`de_diagram`], which takes a malformed one
 //! (a hostile file) as `None` and leaves the rest of the layer reading.
 
-use rustgis_data::{Dataset, GeometryType};
+use rustgis_data::Dataset;
 use serde::{Deserialize, Serialize};
 
 use crate::color::Rgba;
@@ -207,7 +207,7 @@ impl DiagramSettings {
 
     /// Row `row`'s category values with their colours, and their total, as `(values, total)`:
     /// finite positive values only (a missing field, a null or non-number, a zero or negative
-    /// one, is skipped), and `None` when nothing is left to draw.
+    /// one, is skipped), and `None` when nothing is left to draw or the total overflows.
     pub fn values(&self, ds: &Dataset, row: usize) -> Option<(Vec<(f64, Rgba)>, f64)> {
         let mut out: Vec<(f64, Rgba)> = Vec::with_capacity(self.categories.len());
         let mut total = 0.0;
@@ -218,18 +218,20 @@ impl DiagramSettings {
             total += v;
             out.push((v, c.colour));
         }
-        (total > 0.0).then_some((out, total))
+        (total > 0.0 && total.is_finite()).then_some((out, total))
     }
 
     /// The legend rows of its categories: one per category, in draw order, its field the label.
-    pub fn legend(&self) -> Vec<LegendEntry> {
+    /// On a line layer the colour goes in the stroke, which is what a line's swatch draws; else it
+    /// is the fill, with a white outline.
+    pub fn legend(&self, line: bool) -> Vec<LegendEntry> {
         self.categories
             .iter()
             .map(|c| LegendEntry {
                 label: c.field.clone(),
                 symbol: Symbol {
                     fill: c.colour,
-                    stroke: Rgba::rgb(0xFF, 0xFF, 0xFF),
+                    stroke: if line { c.colour } else { Rgba::rgb(0xFF, 0xFF, 0xFF) },
                     stroke_width: 1.0,
                     size: 7.0,
                     marker: Marker::Circle,
@@ -237,11 +239,6 @@ impl DiagramSettings {
                 fallback: false,
             })
             .collect()
-    }
-
-    /// Whether the diagram can draw anything on a layer of geometry `g` (a table can't host one).
-    pub fn fits(&self, g: GeometryType) -> bool {
-        !matches!(g, GeometryType::None)
     }
 }
 
@@ -274,7 +271,7 @@ pub fn de_diagram<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Diagr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustgis_data::{Field, FieldType, Value};
+    use rustgis_data::{Field, FieldType, GeometryType, Value};
 
     fn settings() -> DiagramSettings {
         DiagramSettings {
@@ -367,11 +364,26 @@ mod tests {
     }
 
     #[test]
+    fn a_total_that_overflows_draws_nothing() {
+        // Two finite values whose sum is infinite: no slice would be drawn, so none is returned.
+        let mut ds = Dataset::new(
+            "big",
+            GeometryType::Polygon,
+            vec![Field::new("pop_male", FieldType::Double), Field::new("pop_female", FieldType::Double)],
+        );
+        ds.push(None, vec![Value::Float(1e308), Value::Float(1e308)]);
+        assert!(settings().values(&ds, 0).is_none());
+    }
+
+    #[test]
     fn legend_lists_one_row_per_category() {
-        let l = settings().legend();
+        let l = settings().legend(false);
         assert_eq!(l.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["pop_male", "pop_female"]);
         assert_eq!(l[0].symbol.fill, CATEGORY_COLORS[0]);
+        assert_eq!(l[0].symbol.stroke, Rgba::rgb(0xFF, 0xFF, 0xFF), "a white outline on a polygon or point layer");
         assert!(l.iter().all(|e| !e.fallback));
+        let line = settings().legend(true);
+        assert_eq!(line[0].symbol.stroke, CATEGORY_COLORS[0], "a line's swatch draws its stroke, so the colour is there");
     }
 
     #[test]

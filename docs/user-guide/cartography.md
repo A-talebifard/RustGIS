@@ -372,8 +372,8 @@ its split of, say, male and female population. The categories take colours in tu
 new layers take; a feature where every category is null or zero draws nothing. A pie's slice
 angles are each category's share of the total; a bar chart's bars rise from a baseline, one per
 category. The size is a fixed radius or height in points, the same for every feature, or one grown
-with the categories' sum (square-root scaled, as Proportional Symbols grow) so a feature with twice
-the total draws a chart of twice the area. By command:
+with the categories' sum: from the smallest size to the largest, by the square root of the total's
+share of the range, as Proportional Symbols grow. By command:
 
 ```text
 layer.diagram={"layer":"Regions","kind":"pie","fields":["pop_male","pop_female"]}

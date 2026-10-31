@@ -3533,7 +3533,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             let Some(c) = diagrams::anchor(g) else { continue };
                             let (x, y) = ctx.px(c);
                             let Some((values, total)) = d.values(ds_ptr, row) else { continue };
-                            diagrams::draw(dest, x, y, d, &values, total, if direct { opacity } else { 1.0 }, ctx.ppp);
+                            diagrams::draw(dest, x, y, d, &values, total, if direct { opacity } else { 1.0 }, ctx.ppp, display.paused);
                         }
                     }
                 }
