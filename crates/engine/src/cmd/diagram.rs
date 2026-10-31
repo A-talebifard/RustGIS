@@ -135,6 +135,21 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         .enumerate()
         .map(|(i, (field, colour))| DiagramCategory { field, colour: colour.unwrap_or(CATEGORY_COLORS[i % CATEGORY_COLORS.len()]) })
         .collect();
+    // A value a chart cannot draw (zero, negative, or not a number; a null is just missing) is left
+    // out of its feature's chart: say how many, per field.
+    let mut notes: Vec<String> = Vec::new();
+    for c in &categories {
+        let Some(fi) = l.dataset.field_index(&c.field) else { continue };
+        let skipped = (0..l.dataset.features.len())
+            .filter(|&row| {
+                let v = l.dataset.value(row, fi);
+                !v.is_null() && !v.as_f64().is_some_and(|x| x > 0.0)
+            })
+            .count();
+        if skipped > 0 {
+            notes.push(format!("{skipped} value(s) of '{}' are zero, negative or not numbers, and are not drawn", c.field));
+        }
+    }
     // What each slice or bar says beside it: "none" (the default), "value", "percent" or "both".
     let labels = match p.get("labels") {
         None | Some(Value::Null) => DiagramLabel::None,
@@ -169,10 +184,14 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         }
     };
     l.diagram = Some(DiagramSettings { kind, categories, size, start_angle, background, stroke, stroke_width, labels }.clamped());
-    Ok(json!({
+    let out = json!({
         "kind": l.diagram.as_ref().map(|d| d.kind.label().to_lowercase()),
         "fields": l.diagram.iter().flat_map(|d| d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()}))).collect::<Vec<_>>(),
-    }))
+    });
+    for note in notes {
+        s.notify(note, false);
+    }
+    Ok(out)
 }
 
 /// The layer's diagram settings, or null without one.
@@ -283,5 +302,28 @@ mod tests {
         s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": {"from": "18", "to": 40}})).unwrap();
         let d = s.map().layer(id).unwrap().diagram.clone().expect("set");
         assert!(matches!(d.size, DiagramSize::Scaled { min_size, .. } if min_size == 18.0));
+    }
+
+    #[test]
+    fn a_value_a_chart_cannot_draw_is_said_by_count() {
+        let (mut s, _) = regions();
+        let mark = s.notice_mark();
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male", "pop_female"]})).unwrap();
+        assert!(s.notices_since(mark).is_empty(), "clean input says nothing");
+        // A negative and a zero are not drawn, and say so once for their field; a null is missing, not skipped.
+        let mut ds = Dataset::new(
+            "Change",
+            GeometryType::Polygon,
+            vec![Field::new("net", FieldType::Integer), Field::new("gain", FieldType::Integer)],
+        );
+        ds.push(None, vec![Value::Int(-3_000), Value::Int(4_000)]);
+        ds.push(None, vec![Value::Int(0), Value::Int(2_000)]);
+        ds.push(None, vec![Value::Null, Value::Int(1_000)]);
+        let id = s.map_mut().add_dataset(ds);
+        s.active_layer = Some(id);
+        let mark = s.notice_mark();
+        s.run("layer.diagram", &json!({"kind": "bar", "fields": ["net", "gain"]})).unwrap();
+        let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(said, ["2 value(s) of 'net' are zero, negative or not numbers, and are not drawn"]);
     }
 }

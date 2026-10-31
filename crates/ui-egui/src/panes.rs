@@ -4115,8 +4115,8 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(tl!("Diagram")).size(11.5).color(t.text_dim))
             .on_hover_text(tl!("A small chart of several numeric fields, drawn on each feature over its symbol"));
-        if l.diagram.is_some() && ui.small_button(tl!("Remove")).clicked() {
-            let _ = app.run("layer.clearDiagram", json!({}));
+        if l.diagram.is_some() && ui.small_button(tl!("Remove")).clicked() && let Err(error) = app.run("layer.clearDiagram", json!({})) {
+            app.session.notify(error, true);
         }
     });
     let Some(mut d) = l.diagram.clone() else {

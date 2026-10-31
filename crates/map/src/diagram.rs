@@ -205,14 +205,26 @@ impl DiagramSettings {
         }
     }
 
+    /// Each category's field index in `ds`, in draw order (`None` for a field the dataset lacks):
+    /// resolved once for a layer's features, for [`Self::values_at`].
+    pub fn field_indices(&self, ds: &Dataset) -> Vec<Option<usize>> {
+        self.categories.iter().map(|c| ds.field_index(&c.field)).collect()
+    }
+
     /// Row `row`'s category values with their colours, and their total, as `(values, total)`:
     /// finite positive values only (a missing field, a null or non-number, a zero or negative
     /// one, is skipped), and `None` when nothing is left to draw or the total overflows.
     pub fn values(&self, ds: &Dataset, row: usize) -> Option<(Vec<(f64, Rgba)>, f64)> {
+        self.values_at(ds, row, &self.field_indices(ds))
+    }
+
+    /// [`Self::values`] with the field indices given ([`Self::field_indices`]), so a layer's
+    /// features resolve them once rather than per feature.
+    pub fn values_at(&self, ds: &Dataset, row: usize, fields: &[Option<usize>]) -> Option<(Vec<(f64, Rgba)>, f64)> {
         let mut out: Vec<(f64, Rgba)> = Vec::with_capacity(self.categories.len());
         let mut total = 0.0;
-        for c in &self.categories {
-            let Some(v) = ds.field_index(&c.field).and_then(|fi| ds.value(row, fi).as_f64()).filter(|v| v.is_finite() && *v > 0.0) else {
+        for (c, fi) in self.categories.iter().zip(fields) {
+            let Some(v) = fi.and_then(|fi| ds.value(row, fi).as_f64()).filter(|v| v.is_finite() && *v > 0.0) else {
                 continue;
             };
             total += v;

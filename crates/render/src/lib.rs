@@ -3519,6 +3519,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                     // Diagrams: a small chart on each feature from several fields, over the
                     // renderer's own symbol (pie or bars, as ArcGIS Pro's Chart symbology draws).
                     if let Some(d) = layer.diagram.as_ref().filter(|_| !layer.graphics) {
+                        let fields = d.field_indices(ds_ptr);
                         for (row, g) in geoms.iter().enumerate() {
                             let Some(g) = g else { continue };
                             if rows.get(row) != Some(&true) {
@@ -3532,7 +3533,7 @@ fn render_frame(map: &mut Map, view: &View, full_res_rasters: bool, backend: Bac
                             }
                             let Some(c) = diagrams::anchor(g) else { continue };
                             let (x, y) = ctx.px(c);
-                            let Some((values, total)) = d.values(ds_ptr, row) else { continue };
+                            let Some((values, total)) = d.values_at(ds_ptr, row, &fields) else { continue };
                             diagrams::draw(dest, x, y, d, &values, total, if direct { opacity } else { 1.0 }, ctx.ppp, display.paused);
                         }
                     }
