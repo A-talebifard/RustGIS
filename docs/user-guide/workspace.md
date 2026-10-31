@@ -71,6 +71,89 @@ replace the first one's copy; it says so as it starts. Nor does RustGIS autosave
 folder can't lock files (some network or synced folders), where it can't tell a second copy apart.
 The browser app doesn't autosave yet; it warns before you leave a page with unsaved changes.
 
+### Session log
+
+RustGIS keeps a **log** of the commands run in the session: what was done, when, with what, and
+whether it worked. It is an audit trail of the session, for reviewing work or recalling what was
+run; it runs nothing again (History's Copy as code and recorded tasks do that). Every
+front end goes into it alike: the app, scripts, the AI Assistant, the command line, Python and MCP.
+
+- **What goes in:** each command that changes the project, and each that names a file, folder,
+  address or connection, reads included (an export, a download, a save, opening a file), plus
+  undo and redo, with the step they took back or brought back. Reading and looking around within
+  the project (listing layers, describing a tool, reading features, moving the view) is left
+  out. A command run by another (a script's lines, a model's steps) is inside its parent's
+  entry. A plugin can't empty the log or turn it off, and reading it (`project.log`) takes the
+  file permission, since it names the files and addresses the user's commands used.
+- **Each entry:** `at` (when it started, in milliseconds since 1970, UTC; for a plugin's command
+  that waited for its downloads, when its last run started), `command`, `params`, `ok`, `error`
+  when it failed, and `millis`, how long it took.
+- **For the session only:** the log is kept in memory, across the projects opened or made in the
+  session, until RustGIS closes or the log is cleared. A saved project, its recovery copy, a
+  package or a template carries none of it, so sharing a project shares no log. Reading, writing
+  out, clearing or switching the log doesn't change the project and is no undo step; undoing a
+  command doesn't take its entry back. Steps that undo takes back as one (a held arrow key
+  nudging an element) are one entry, with the last one's parameters. Each copy of RustGIS (the
+  desktop app, a browser tab, a Python program) keeps its own.
+- **No secrets:** the parameters lose passwords, keys and tokens as History's Copy as code does, and
+  so does an error's text; a document given as text (a map, a project) or a file's contents in
+  base64 (any text made only of base64's characters, so a long path with no dot too), past 200
+  characters, is kept as its size only (a shorter one is kept, its secrets taken
+  out as any other text's), and an SQL `CREATE SECRET`'s options as `(…)`. A secret written
+  as plain words, with no name or address form (a password typed into a note), isn't recognised:
+  look at an exported log before sharing it. Each entry's parameters are clipped to about 4 KB of
+  JSON (a long text is cut, a list keeps its first 100 items), its error to 500 characters and a
+  `…`, and the log keeps its last 10,000 entries, the oldest dropped first. Plugins' commands take
+  at most 1,000 of those places: past that, a plugin's new entry pushes out an older plugin entry,
+  not one of the user's.
+
+From scripts: `project.log {"since"?, "until"?, "command"?, "failed"?, "limit"?}` lists entries,
+newest last (`command` is an id, or the start of one ending in a dot, `layer.`; `limit` is a whole
+number, 100 by default and at most 1,000, with `count` saying how many match), and
+`project.exportLog {"path": "log.csv"}` writes it out as CSV (one row an entry, the parameters as a
+JSON column) or JSON Lines (`.jsonl` or `.ndjson`), as the path's extension says; any other
+extension (a `.json`, a project) is refused, whatever `format` is given. `project.clearLog` empties
+it (leaving its own entry) and `project.logCommands {"on": false}` stops it (what is there stays).
+
+### GeoLibre projects
+
+**Open** on desktop or **Project › New › GeoLibre Project…** opens a `.geolibre` or legacy
+`.geolibre.json` file as a new map in the current project. Existing maps stay in place.
+The same import is available to scripts:
+
+```text
+project.importGeolibre={"path":"watershed.geolibre"}
+project.importGeolibre={"url":"https://example.org/watershed.geolibre"}
+```
+
+The command also accepts JSON `text`, base64 `data`, and `dir` for moved local data files.
+An absolute data path is tried first, then its filename under `dir` (the project's folder by
+default). A desktop project may reference files outside that folder; import projects you trust
+to select those files. Browser imports can use inline GeoJSON and web addresses; local paths need desktop.
+A web app link such as `?project=https://example.org/watershed.geolibre` imports the same map.
+This startup link takes precedence over other data/style links so download timing cannot change
+which map receives them.
+
+The map keeps its view, bookmarks, background, layer visibility and opacity, and supported vector
+styles and field labels. The result includes `map`, `layers` and per-layer `notes`, distinguishing
+approximated presentation from skipped sources. Newer format versions are read as far as possible
+with a note. Unsupported layer kinds and project sections are reported rather than silently lost.
+
+Colour classes and proportional sizes are supported separately. Combined colour-and-size styles
+keep colour and use a fixed size; graduated colour class boundaries are retained; proportional
+sizes use RustGIS's area scaling. Label halos use RustGIS defaults. Tile overlays draw above feature
+layers, and nested groups become flat folders with inherited visibility and opacity retained.
+Local data paths require a locally opened project or an explicit `dir`; URL and pasted-text imports cannot read local files without that folder.
+URL data downloaded in the browser fills its reserved layer position when it arrives; wait for
+those downloads before saving. Saving is refused while imported layers are still downloading. Recovery copies retain completed work and omit unfinished layers. A browser import can queue at most 16 whole-file downloads
+(fewer if other downloads are queued, active, or awaiting completion); a larger batch is refused before creating its map.
+Split that project into smaller imports or use the desktop app. Streaming tiles and COGs do
+not consume those download slots. Desktop GeoLibre URL imports wait for each download on the calling thread, which can pause the interface.
+Each request, including a remote MBTiles archive, has a 60-second timeout; download larger archives locally before importing. Zarr sources use their saved variable and dimension indices,
+or the first supported variable when those choices are absent. Imported Zarr stores are read
+one at a time with a 128 MiB download-buffer limit; larger slices must be reduced or opened
+through the desktop data workflow.
+
 ### QGIS projects and styles
 
 A QGIS project (`.qgs`, or a `.qgz` archive) opens as a new map of the current project: **Open**
@@ -101,9 +184,9 @@ Each layer keeps its look:
   shifted, turned or anchored off its centre, as a point's marks; a marker angle taken from a
   field (`"field"` or `- "field"`) as the layer's rotation field; a fill symbol of several layers
   as stacked fills, its brush patterns (horizontal, vertical, diagonal, cross) and line pattern
-  fills as hatch lines, point pattern fills as markers on their grid, and the fills not drawn yet
-  (gradient and shapeburst fills in their first colour; dense brushes, SVG, raster and random fills as
-  a tint of their colour).
+  fills as hatch lines, point pattern fills as markers on their grid, gradient and shapeburst
+  fills with their colours or colour ramp, and the fills not drawn yet (dense brushes, SVG, raster
+  and random fills as a tint of their colour).
 - **Layer settings**: opacity, blending, visibility range, filter (subset string), and the
   reference scale.
 - **Rasters**: singleband grey as a stretch from black to white, singleband pseudocolour as a
@@ -126,10 +209,19 @@ Each layer keeps its look:
 Projects and styles from QGIS 1 and 2 read too: their legend gives the layers' order, and the
 older names of the same settings are read.
 
-QGIS expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
+A symbol's data-defined size, fill and outline colours, outline width and marker angle carry over
+as the layer's [symbol expressions](cartography.md#symbols-by-expression), sizes turned from the
+symbol's unit (millimetres, points, pixels, inches; map units at the reference scale) into points, where RustGIS's [expression language](expressions.md) reads them. A marker of several layers
+scales them all with the size one of its layers takes; a marker drawn as marks (several layers,
+or one shifted or turned) leaves its colours and outline widths by expression out, noted, and so
+does a line of several strokes. They apply to every feature, so a layer whose classes set different
+ones (or one with a class switched off) leaves them out, noted. One using a
+function or variable it lacks, or a field the layer hasn't, is noted and left out.
+
+QGIS filter expressions carry over where they are SQL: fields compared with values, `LIKE`, `IN`,
 `IS NULL`, joined by `AND`, `OR` and `NOT`. What RustGIS doesn't draw as QGIS does is drawn as
 near as it can, or left out, and said: the import's notes list, layer by layer, what was
-approximated (gradient and shapeburst fills drawn in their first colour, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
+approximated (gradient and shapeburst fills' offsets left out and colour ramps other than gradients drawn from their first colour to their last, SVG, raster and random fills and dense brushes as a tint of their colour, SVG markers as circles,
 dashed polygon outlines solid, label halos with sharp corners drawn round and blended ones drawn
 over the map, label backgrounds of other shapes drawn as rectangles, label distances from lines
 and polygons, a distance around points moved straight up, labels wrapped at a shortest line
@@ -169,6 +261,19 @@ is available; unavailable commands stay visible but disabled, with the reason on
 Use scripts or the assistant for parameterized commands without an interactive entry point.
 
 ## Keyboard shortcuts
+
+**Settings › Customize › Keyboard Shortcuts** assigns multiple keys to commands and map tools.
+Click **Add…** and press the desired key combination. Escape cancels; **Assign Escape** binds Escape.
+If the combination is already in use, choose **Replace** or **Cancel**.
+Tab, Enter, Space and arrow key bindings can override their usual keyboard navigation actions.
+Click a displayed key to remove it, **Reset {key}** (for example, **Reset Ctrl+T**) to restore a default key, or **Reset All** to restore
+all defaults. These changes are saved as a user preference on this device. Copy, Cut and Paste stay
+fixed. While typing, shortcuts without Ctrl/⌘ are paused, including Shift and Alt combinations. During
+first-person navigation, unmodified shortcuts are paused except Escape, Home and Delete. Browsers may
+reserve some shortcuts. In Command Search, right-click a command and choose **Keyboard Shortcuts**
+to open it in the editor. If saved preferences are unreadable or exceed the supported limits, the
+original value is preserved and edits apply only to the current session. **Reset All** explicitly
+replaces the saved shortcuts with the defaults.
 
 See the [keyboard shortcut reference](index.md#keyboard-shortcuts) for project, map and editing
 shortcuts, macOS bindings and text-field undo behavior. **Help › Shortcuts** lists the active
@@ -249,6 +354,10 @@ duplication and nudging have their own [layout shortcuts](layouts.md#layouts).
       `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/{date:YYYY-MM-DD}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`.
     - A Zarr variable added with **Follow the time slider** (Home › Add › Add Data › Zarr…) shows
       the step the slider is at; see [Zarr stores](data.md#zarr-stores).
+    - So does a WMS or WMTS layer with a time dimension, as it is added by default (**Follow the
+      time slider** in Web Data's dialogs; `service.add` without a `"time"`): its requests take
+      the step's time, and a slider that is off starts with the layer's times; see
+      [Layers that change with time](web-data.md#layers-that-change-with-time).
     - From scripts: `time.bind` (`"layer"`, `"field"`, `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`), `time.set` (the
       window: `"start"`, `"end"`, `"unit"`, `"interval"`, `"show"`, `"speed"`, `"loop"`,
       `"format"`…), `time.goTo` (`"date"`, or `"step"` from 0), `time.step` (`"by"`, negative goes

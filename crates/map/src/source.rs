@@ -18,6 +18,7 @@ use rustgis_data::source::{Batch, FeatureSource, Request, SourceInfo};
 use rustgis_geom::Extent;
 use serde::{Deserialize, Serialize};
 
+mod render_lod;
 mod window;
 
 /// Retained streamed rows and geometry caches per map; excludes scratch and render/export copies.
@@ -54,6 +55,9 @@ pub struct SourceLayer {
     handle: Option<Arc<dyn FeatureSource>>,
     #[serde(skip)]
     window: Option<Window>,
+    /// Whole-source thinning decisions shared by render snapshots, independent of view rows.
+    #[serde(skip)]
+    render_lod: Arc<Mutex<render_lod::Decisions>>,
     #[serde(skip)]
     pending: Option<Arc<Pending>>,
     /// Projection used for this disposable window's geometry cache.
@@ -152,6 +156,34 @@ pub struct PostgisEdit {
     pub versions: Versions,
 }
 
+/// A GeoPackage feature table loaded whole for desktop editing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GpkgEdit {
+    /// Absolute when loaded; relative to a project saved beside it.
+    pub path: String,
+    pub table: String,
+    /// Its INTEGER PRIMARY KEY column.
+    pub key: String,
+    pub geometry: String,
+    /// The source SRS when these rows were loaded.
+    pub srs_id: i64,
+    /// The declared geometry type (uppercase) and Z/M flags when these rows were loaded.
+    /// Missing in a project means unknown: saving refuses until Discard Edits reloads them.
+    #[serde(default)]
+    pub geometry_type: String,
+    #[serde(default)]
+    pub z: i64,
+    #[serde(default)]
+    pub m: i64,
+    /// The table's durable revision, checked before saving pending inserts.
+    pub revision: String,
+    pub writable: bool,
+    #[serde(default)]
+    pub limit: usize,
+    /// Every column's stored fingerprint and the loaded feature's hash, by key.
+    pub versions: Versions,
+}
+
 /// How a loaded row is told apart from the same row edited: a hash of its geometry and
 /// attributes (FNV-1a over their JSON, the same in every build).
 pub fn row_hash(f: &rustgis_data::Feature) -> u64 {
@@ -174,7 +206,7 @@ pub fn row_hash(f: &rustgis_data::Feature) -> u64 {
     h.0
 }
 
-/// A loaded row: its version (PostgreSQL's `xmin`) and [`row_hash`] as read.
+/// A loaded row: its source version or fingerprint and [`row_hash`] as read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowVersion {
     pub version: i64,
@@ -241,10 +273,10 @@ impl<'de> Deserialize<'de> for Versions {
     }
 }
 
-/// What changed in a layer loaded from PostGIS since it was loaded (or last saved), by
+/// What changed in a source layer since it was loaded (or last saved), by
 /// comparing its features with the rows as read.
 #[derive(Debug, Default)]
-pub struct PostgisChanges {
+pub struct RowChanges {
     /// Features of loaded rows that differ from them, with the rows' versions.
     pub updates: Vec<(rustgis_data::Feature, i64)>,
     /// Loaded rows no feature holds any more: their keys and versions.
@@ -255,20 +287,20 @@ pub struct PostgisChanges {
     pub insert_rows: Vec<usize>,
 }
 
-impl PostgisChanges {
+impl RowChanges {
     pub fn is_empty(&self) -> bool {
         self.updates.is_empty() && self.deletes.is_empty() && self.inserts.is_empty()
     }
 }
 
-impl PostgisEdit {
+impl Versions {
     /// What changed in `features` since the rows were read. A feature whose id is a loaded row's
     /// is that row (once: a copy with the same id is new).
-    pub fn changes(&self, features: &[rustgis_data::Feature]) -> PostgisChanges {
-        let mut out = PostgisChanges::default();
+    pub fn changes(&self, features: &[rustgis_data::Feature]) -> RowChanges {
+        let mut out = RowChanges::default();
         let mut seen = std::collections::HashSet::new();
         for (i, f) in features.iter().enumerate() {
-            match self.versions.get(f.id) {
+            match self.get(f.id) {
                 Some(row) if seen.insert(f.id) => {
                     if row_hash(f) != row.hash {
                         out.updates.push((f.clone(), row.version));
@@ -280,9 +312,21 @@ impl PostgisEdit {
                 }
             }
         }
-        out.deletes = self.versions.iter().filter(|(k, _)| !seen.contains(k)).map(|(k, r)| (k, r.version)).collect();
+        out.deletes = self.iter().filter(|(k, _)| !seen.contains(k)).map(|(k, r)| (k, r.version)).collect();
         out
     }
+}
+
+/// The loaded rows' new baseline after a save or load.
+pub fn versions_of(features: &[rustgis_data::Feature], old: &Versions, saved: &std::collections::HashMap<u64, i64>) -> Versions {
+    let mut seen = std::collections::HashSet::new();
+    features
+        .iter()
+        .filter_map(|f| {
+            let version = saved.get(&f.id).copied().or_else(|| old.get(f.id).map(|r| r.version))?;
+            seen.insert(f.id).then(|| (f.id, RowVersion { version, hash: row_hash(f) }))
+        })
+        .collect()
 }
 
 /// A MySQL or MariaDB table a layer reads live.
@@ -578,6 +622,22 @@ impl SourceLayer {
         self.handle.as_ref().filter(|h| h.streams_chunks()).cloned()
     }
 
+    /// Reuses a complete source's thinning decision for a projection and LOD level. Both
+    /// outcomes are retained across render snapshots; failed calculations are retried. The
+    /// bounded cache follows the open handle, and explicit source resets discard it.
+    pub fn cached_thinning(
+        &self,
+        projection: &str,
+        level: i32,
+        calculate: impl FnOnce() -> rustgis_data::Result<bool>,
+    ) -> rustgis_data::Result<bool> {
+        let Some(handle) = &self.handle else { return calculate() };
+        // Calculations insert only on success, so an escaped source panic leaves a valid
+        // cache. Recover the guard so later frames can cache successful decisions again.
+        let mut cache = self.render_lod.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.get_or_try_insert(handle, projection, level, calculate)
+    }
+
     /// Retained interaction bytes assigned by the map, or the standalone default.
     pub fn budget(&self) -> usize {
         if self.byte_budget == 0 { VIEW_BYTES } else { self.byte_budget }
@@ -852,6 +912,12 @@ impl SourceLayer {
 
     /// Forgets the window, so the next view reads again (after the source changes).
     pub fn reset(&mut self) {
+        self.render_lod = Default::default();
+        self.reset_window();
+    }
+
+    /// Drops disposable view rows while retaining decisions about the unchanged full source.
+    pub(crate) fn reset_window(&mut self) {
         self.window = None;
         self.pending = None;
         self.ready_cache = None;
@@ -1047,6 +1113,22 @@ pub fn generation() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Reopening this same layer must invalidate populated decisions even without `reset`.
+    #[test]
+    fn reopening_a_populated_thinning_cache_uses_the_new_handle() {
+        let mut ds = rustgis_data::Dataset::new("source", rustgis_data::GeometryType::Point, vec![]);
+        ds.push(Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(0.0, 0.0))), vec![]);
+        let bytes = std::sync::Arc::new(rustgis_data::source::fgb::write(&ds).unwrap());
+        let handle = rustgis_data::source::open_shared("source.fgb", bytes.clone(), None).unwrap();
+        let mut source = super::SourceLayer::from_bytes("source.fgb", bytes, None, handle);
+        assert!(!source.cached_thinning("mercator", 0, || Ok(false)).unwrap());
+        let old_handle = source.handle.clone().unwrap();
+        source.open().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old_handle, source.handle.as_ref().unwrap()));
+        assert!(source.cached_thinning("mercator", 0, || Ok(true)).unwrap());
+        assert!(source.cached_thinning("mercator", 0, || panic!("new handle's decision must be cached")).unwrap());
+    }
+
     #[test]
     fn postgis_edits_keep_their_row_versions() {
         let edit = super::PostgisEdit {
@@ -1105,10 +1187,10 @@ mod tests {
             limit: 0,
             versions: loaded.iter().map(|f| (f.id, super::RowVersion { version: f.id as i64 * 10, hash: super::row_hash(f) })).collect(),
         };
-        assert!(edit.changes(&loaded).is_empty());
+        assert!(edit.versions.changes(&loaded).is_empty());
         // Row 1 as it was, row 2 renamed, row 3 deleted, a new feature and a copy of row 1.
         let now = [row(1, "a"), row(2, "bee"), row(9, "new"), row(1, "copy")];
-        let c = edit.changes(&now);
+        let c = edit.versions.changes(&now);
         assert_eq!(c.updates.iter().map(|(f, v)| (f.id, *v)).collect::<Vec<_>>(), vec![(2, 20)]);
         assert_eq!(c.deletes, vec![(3, 30)]);
         assert_eq!(c.inserts.iter().map(|f| f.id).collect::<Vec<_>>(), vec![9, 1]);
