@@ -652,6 +652,9 @@ pub struct Session {
     /// Set by [`Session::request_url`] for [`Session::guarded`]: the command running changed
     /// nothing, it only left a request (a plugin's own answer can't claim that).
     request_only: bool,
+    /// Set by [`Session::run_leaving_downloads`]: `layer.addUrl` leaves what it would wait for
+    /// to the front end ([`Session::request_url`]), as in the browser.
+    leave_downloads: bool,
     /// Plugin commands waiting for their `host.fetch` answers to run again (the browser).
     pub(crate) plugin_retries: Vec<cmd::plugins::fetch::Retry>,
     /// How many times the plugin command running now has been run again for its fetches.
@@ -856,6 +859,7 @@ impl Session {
             #[cfg(test)]
             queue_gp_files: false,
             request_only: false,
+            leave_downloads: false,
             plugin_retries: Vec::new(),
             retry_tries: 0,
             quiet_failure: false,
@@ -917,13 +921,12 @@ impl Session {
 
     /// Keeps a `layer.addUrl` request for the front end to download off the frame and add when
     /// it lands (the browser, where a command may not wait): the command's answer, which says
-    /// so. An address asked for again while it waits is asked for once, and past a few waiting
+    /// so. A request made again while it waits is made once (the same address read another way,
+    /// as another layer or with other columns, is another request), and past a few waiting
     /// requests the next is refused rather than silently dropping one already promised.
     pub fn request_url(&mut self, p: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = p.get("url").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if !self.url_requests.iter().any(|q| {
-            q.get("url").and_then(serde_json::Value::as_str) == Some(url.as_str()) && q.get("geolibreLayer") == p.get("geolibreLayer")
-        }) {
+        if !self.url_requests.iter().any(|q| q == p) {
             if self.url_requests.len() >= MAX_URL_REQUESTS {
                 return Err(format!("{url}: {MAX_URL_REQUESTS} downloads are already waiting; try again when they have landed"));
             }
@@ -931,6 +934,17 @@ impl Session {
         }
         self.request_only = true;
         Ok(serde_json::json!({"pending": true, "url": url}))
+    }
+
+    /// Runs a command as [`Session::run`] does, except that the downloads `layer.addUrl` would
+    /// wait for (on the desktop) are left to the front end, as in the browser: the app runs the
+    /// commands of plugins this way, so a plugin adding data by address doesn't freeze it. The
+    /// command line, scripts and the assistant run commands that wait, and see what was added.
+    pub fn run_leaving_downloads(&mut self, id: &str, params: &serde_json::Value) -> CmdResult {
+        let was = std::mem::replace(&mut self.leave_downloads, true);
+        let r = self.run(id, params);
+        self.leave_downloads = was;
+        r
     }
 
     /// The `layer.addUrl` requests waiting for the front end ([`Session::request_url`]), taken.
