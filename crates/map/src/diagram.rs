@@ -346,11 +346,8 @@ mod tests {
 
     #[test]
     fn a_scaled_range_too_wide_to_measure_is_reset() {
-        let d = DiagramSettings {
-            size: DiagramSize::Scaled { min_size: 4.0, max_size: 36.0, min: -1e308, max: 1e308 },
-            ..settings()
-        }
-        .clamped();
+        let d = DiagramSettings { size: DiagramSize::Scaled { min_size: 4.0, max_size: 36.0, min: -1e308, max: 1e308 }, ..settings() }
+            .clamped();
         let DiagramSize::Scaled { min, max, .. } = d.size else { panic!("still scaled") };
         assert_eq!((min, max), (0.0, 1.0), "its span would be infinite, so the neutral range");
         assert!(d.size_for(1e308).is_finite(), "no size is not a number");
@@ -358,9 +355,8 @@ mod tests {
 
     #[test]
     fn a_category_without_a_name_does_not_cost_one_of_the_cap() {
-        let mut categories: Vec<DiagramCategory> = (0..MAX_CATEGORIES)
-            .map(|i| DiagramCategory { field: format!("f{i}"), colour: CATEGORY_COLORS[0] })
-            .collect();
+        let mut categories: Vec<DiagramCategory> =
+            (0..MAX_CATEGORIES).map(|i| DiagramCategory { field: format!("f{i}"), colour: CATEGORY_COLORS[0] }).collect();
         categories.insert(0, DiagramCategory { field: " ".into(), colour: CATEGORY_COLORS[1] });
         let d = DiagramSettings { categories, ..settings() }.clamped();
         assert_eq!(d.categories.len(), MAX_CATEGORIES);

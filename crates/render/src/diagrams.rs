@@ -8,7 +8,9 @@ use rustgis_geom::Coord;
 #[cfg(doc)]
 use rustgis_map::Layer;
 use rustgis_map::{DiagramLabel, DiagramSettings, Rgba};
-use tiny_skia::{FillRule, LineJoin, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineJoin, PathBuilder, Stroke, Transform};
+
+use crate::Canvas;
 
 use crate::paint;
 
@@ -19,7 +21,7 @@ use crate::paint;
 /// display is paused, which draws no value labels.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
-    pm: &mut Pixmap,
+    pm: &mut Canvas,
     x: f32,
     y: f32,
     d: &DiagramSettings,
@@ -97,7 +99,7 @@ fn interior(rings: &[Vec<Coord>]) -> Option<Coord> {
         }
     }
     xs.sort_by(f64::total_cmp);
-    let runs: Vec<(f64, f64)> = xs.chunks_exact(2).map(|s| (s[0], s[1])).collect();
+    let runs: Vec<(f64, f64)> = xs.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
     if runs.iter().any(|(a, b)| *a <= c.x && c.x <= *b) {
         return Some(c);
     }
@@ -108,7 +110,7 @@ fn interior(rings: &[Vec<Coord>]) -> Option<Coord> {
 /// each clockwise from `start_angle` (degrees from north) by its share of `total`, each outlined.
 #[allow(clippy::too_many_arguments)]
 fn pie(
-    pm: &mut Pixmap,
+    pm: &mut Canvas,
     x: f32,
     y: f32,
     d: &DiagramSettings,
@@ -160,7 +162,7 @@ fn pie(
 /// from a baseline under the anchor, the chart as wide as a bar each plus a gap, outlined as one.
 #[allow(clippy::too_many_arguments)]
 fn bars(
-    pm: &mut Pixmap,
+    pm: &mut Canvas,
     x: f32,
     y: f32,
     d: &DiagramSettings,
@@ -207,7 +209,7 @@ fn bars(
 /// Says a category's value, its percent of the total, or both, at (`x`, `y`) aligned as `align`
 /// says, in a small haloed dark text (7 pt, as the map's finest labels are).
 #[allow(clippy::too_many_arguments)]
-fn label_at(pm: &mut Pixmap, x: f32, y: f32, mode: DiagramLabel, v: f64, total: f64, ppp: f32, align: crate::text::Align) {
+fn label_at(pm: &mut Canvas, x: f32, y: f32, mode: DiagramLabel, v: f64, total: f64, ppp: f32, align: crate::text::Align) {
     if !(x.is_finite() && y.is_finite()) {
         return;
     }
@@ -228,7 +230,7 @@ fn percent(v: f64, total: f64) -> String {
 }
 
 /// Outlines `p` in `colour`, `width` points wide (at least half a pixel), when it shows.
-fn stroke(pm: &mut Pixmap, p: &tiny_skia::Path, colour: Rgba, width: f32, opacity: f32, ppp: f32) {
+fn stroke(pm: &mut Canvas, p: &tiny_skia::Path, colour: Rgba, width: f32, opacity: f32, ppp: f32) {
     if colour.a() == 0 || width <= 0.0 {
         return;
     }
@@ -352,13 +354,13 @@ mod tests {
         }
     }
 
-    fn painted(pm: &Pixmap, x: u32, y: u32) -> bool {
-        pm.pixel(x, y).is_some_and(|p| p.alpha() > 0)
+    fn painted(pm: &Canvas, x: u32, y: u32) -> bool {
+        pm.pixmap().pixel(x, y).is_some_and(|p| p.alpha() > 0)
     }
 
     #[test]
     fn a_pie_paints_its_centre_and_leaves_the_corners() {
-        let mut pm = Pixmap::new(64, 64).unwrap();
+        let mut pm = Canvas::new(64, 64).unwrap();
         let d = settings(DiagramKind::Pie);
         draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
         assert!(painted(&pm, 32, 32));
@@ -367,7 +369,7 @@ mod tests {
 
     #[test]
     fn a_bar_rises_from_the_anchor_baseline() {
-        let mut pm = Pixmap::new(64, 64).unwrap();
+        let mut pm = Canvas::new(64, 64).unwrap();
         let d = settings(DiagramKind::Bar);
         // The baseline sits half a size below the anchor; the first bar covers x 21..31 of it.
         draw(&mut pm, 32.0, 32.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
@@ -378,20 +380,20 @@ mod tests {
 
     #[test]
     fn nothing_is_drawn_without_a_positive_total() {
-        let mut pm = Pixmap::new(64, 64).unwrap();
+        let mut pm = Canvas::new(64, 64).unwrap();
         let d = settings(DiagramKind::Pie);
         draw(&mut pm, 32.0, 32.0, &d, &[(0.0, CATEGORY_COLORS[0])], 0.0, 1.0, 1.0, false);
-        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
+        assert!(pm.pixmap().pixels().iter().all(|p| p.alpha() == 0));
     }
 
     #[test]
     fn a_percent_label_draws_just_outside_the_pie() {
-        let mut pm = Pixmap::new(96, 96).unwrap();
+        let mut pm = Canvas::new(96, 96).unwrap();
         let d = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
         draw(&mut pm, 48.0, 48.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
         // The pie reaches 20 px; each label sits just past its crust, so pixels outside that
         // radius are painted where without labels nothing is.
-        let outside = pm.pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
+        let outside = pm.pixmap().pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
             let (dx, dy) = ((i % 96) as f32 - 47.5, (i / 96) as f32 - 47.5);
             (dx * dx + dy * dy) > 21.0 * 21.0
         });
@@ -403,10 +405,10 @@ mod tests {
         // The slices' mid-angles sit at 3 and 9 o'clock: their labels start past the right side and
         // end before the left, so the band 1 to 4 points past the crust, level with the centre,
         // is clear of text.
-        let mut pm = Pixmap::new(96, 96).unwrap();
+        let mut pm = Canvas::new(96, 96).unwrap();
         let d = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
         draw(&mut pm, 48.0, 48.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
-        let on_the_band = pm.pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
+        let on_the_band = pm.pixmap().pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
             let (dx, dy) = ((i % 96) as f32 + 0.5 - 48.0, (i / 96) as f32 + 0.5 - 48.0);
             dy.abs() < 4.0 && (21.0..24.0).contains(&dx.abs())
         });
@@ -417,11 +419,11 @@ mod tests {
     fn a_paused_label_display_draws_no_value_labels() {
         let values = [(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])];
         let labelled = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
-        let mut paused = Pixmap::new(96, 96).unwrap();
+        let mut paused = Canvas::new(96, 96).unwrap();
         draw(&mut paused, 48.0, 48.0, &labelled, &values, 100_000.0, 1.0, 1.0, true);
-        let mut bare = Pixmap::new(96, 96).unwrap();
+        let mut bare = Canvas::new(96, 96).unwrap();
         draw(&mut bare, 48.0, 48.0, &settings(DiagramKind::Pie), &values, 100_000.0, 1.0, 1.0, false);
-        assert!(paused.data() == bare.data(), "the chart draws as it would with no labels");
+        assert!(paused.pixmap().data() == bare.pixmap().data(), "the chart draws as it would with no labels");
     }
 
     #[test]
@@ -462,9 +464,6 @@ mod tests {
             Coord::new(0.0, 3.0),
             Coord::new(0.0, 0.0),
         ]]]);
-        assert!(
-            anchor(&u).is_some_and(|c| c.y > 1.0 && (c.x < 1.0 || c.x > 2.0)),
-            "the point sits in one of the arms, not the gap"
-        );
+        assert!(anchor(&u).is_some_and(|c| c.y > 1.0 && (c.x < 1.0 || c.x > 2.0)), "the point sits in one of the arms, not the gap");
     }
 }

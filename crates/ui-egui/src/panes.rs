@@ -4343,7 +4343,10 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(tl!("Diagram")).size(11.5).color(t.text_dim))
             .on_hover_text(tl!("A small chart of several numeric fields, drawn on each feature over its symbol"));
-        if l.diagram.is_some() && ui.small_button(tl!("Remove")).clicked() && let Err(error) = app.run("layer.clearDiagram", json!({})) {
+        if l.diagram.is_some()
+            && ui.small_button(tl!("Remove")).clicked()
+            && let Err(error) = app.run("layer.clearDiagram", json!({}))
+        {
             app.session.notify(error, true);
         }
     });
@@ -4456,14 +4459,14 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         let mut changed = false;
         match d.size {
             DiagramSize::Fixed(mut s) => {
-                if held_drag(ui, egui::Id::new(("diagram-size", key)), &mut s, 1.0..=200.0, " pt", None) {
+                if held_drag(ui, ui.make_persistent_id(("diagram-size", key)), &mut s, 1.0..=200.0, " pt", None) {
                     d.size = DiagramSize::Fixed(s);
                     changed = true;
                 }
             }
             DiagramSize::Scaled { ref mut min_size, ref mut max_size, .. } => {
-                let lo = held_drag(ui, egui::Id::new(("diagram-size-min", key)), min_size, 1.0..=200.0, " pt", None);
-                let hi = held_drag(ui, egui::Id::new(("diagram-size-max", key)), max_size, 1.0..=200.0, " pt", None);
+                let lo = held_drag(ui, ui.make_persistent_id(("diagram-size-min", key)), min_size, 1.0..=200.0, " pt", None);
+                let hi = held_drag(ui, ui.make_persistent_id(("diagram-size-max", key)), max_size, 1.0..=200.0, " pt", None);
                 changed = lo || hi;
             }
         }
@@ -4477,7 +4480,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         ui.horizontal(|ui| {
             let mut a = d.start_angle;
             let input_label = ui.label(tl!("Start angle"));
-            if held_drag(ui, egui::Id::new(("diagram-start-angle", key)), &mut a, 0.0..=360.0, "°", Some(input_label.id)) {
+            if held_drag(ui, ui.make_persistent_id(("diagram-start-angle", key)), &mut a, 0.0..=360.0, "°", Some(input_label.id)) {
                 d.start_angle = a;
                 apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
             }
@@ -4527,7 +4530,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             d.stroke = picked_colour(colour, d.stroke);
         }
         let mut w = d.stroke_width;
-        if held_drag(ui, egui::Id::new(("diagram-outline-width", key)), &mut w, 0.0..=8.0, " pt", None) {
+        if held_drag(ui, ui.make_persistent_id(("diagram-outline-width", key)), &mut w, 0.0..=8.0, " pt", None) {
             d.stroke_width = w;
             changed = true;
         }
