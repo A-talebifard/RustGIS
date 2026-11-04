@@ -55,7 +55,7 @@ pub fn open_command(path: &str) -> &'static str {
 }
 /// Format version written to files.
 pub const FORMAT: u32 = 1;
-/// Largest project file read (512 MiB).
+/// Largest project file read or saved (512 MiB).
 pub const MAX_BYTES: u64 = 512 << 20;
 
 /// The address a saved file keeps. Only web addresses can contain layer credentials. A tile
@@ -202,7 +202,9 @@ pub struct Table {
 }
 
 /// A table as a file holds it: the dataset's fields beside the id (absent from files written
-/// before tables had ids). Read field by field, since `flatten` would buffer every row first.
+/// before tables had ids), with what its read lost, as a layer keeps it: the coordinate system,
+/// geometry lost to it and Z or M values dropped (absent from files written before tables kept
+/// them). Read field by field, since `flatten` would buffer every row first.
 #[derive(Deserialize)]
 struct TableFile {
     #[serde(default)]
@@ -213,11 +215,17 @@ struct TableFile {
     features: Vec<Feature>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    crs: Option<rustgis_data::raster::Crs>,
+    #[serde(default)]
+    crs_incomplete: bool,
+    #[serde(default)]
+    zm_dropped: bool,
 }
 
 impl From<TableFile> for Table {
     fn from(t: TableFile) -> Self {
-        let TableFile { id, name, geometry_type, fields, features, source } = t;
+        let TableFile { id, name, geometry_type, fields, features, source, crs, crs_incomplete, zm_dropped } = t;
         Table {
             id,
             dataset: Dataset {
@@ -226,8 +234,9 @@ impl From<TableFile> for Table {
                 fields,
                 features: features.into(),
                 source,
-                crs: None,
-                crs_incomplete: false,
+                crs,
+                crs_incomplete,
+                zm_dropped,
                 windowed: false,
             },
         }
@@ -757,6 +766,7 @@ impl Project {
     /// keeps them. This process remembers the 32 most recent distinct saved snapshots with stripped
     /// addresses: opening identical plain project text restores them until that snapshot is evicted
     /// or RustGIS closes. Packages and imports never restore them.
+    /// Refuses text larger than the opening limit, restoring live paths and addresses on failure.
     pub fn saved_text(&mut self, dir: Option<&Path>) -> Result<(String, usize), String> {
         self.ensure_imports_complete()?;
         let was = strip_addresses(self.addresses_mut());
@@ -791,10 +801,12 @@ impl Project {
                 *address = original.clone();
             }
         }
-        if let Ok(text) = &text
-            && n > 0
-        {
-            let (len, hash) = identity(text);
+        let text = text?;
+        if text.len() as u64 > MAX_BYTES {
+            return Err(format!("the project is too large to save (maximum {} MiB)", MAX_BYTES >> 20));
+        }
+        if n > 0 {
+            let (len, hash) = identity(&text);
             let mut kept = kept();
             kept.retain(|entry| (entry.len, entry.hash) != (len, hash));
             if kept.len() >= MAX_WRITTEN {
@@ -802,7 +814,7 @@ impl Project {
             }
             kept.push(Written { len, hash, was });
         }
-        text.map(|text| (text, n))
+        Ok((text, n))
     }
 
     /// The project as an autosaved recovery copy keeps it: its text without passwords, keys, tokens
@@ -901,15 +913,37 @@ impl Project {
         Ok(p)
     }
 
+    /// Opens a project file (a regular file within [`MAX_BYTES`]; see `read_file`), resolving
+    /// its relative paths against its folder.
     pub fn load(path: &Path) -> Result<Project, String> {
-        let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
-        if len > MAX_BYTES {
-            return Err("the project file is too large".into());
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = read_file(path, MAX_BYTES)?;
+        let text = String::from_utf8(bytes).map_err(|_| format!("{} isn't a RustGIS project", path.display()))?;
         let dir = std::path::absolute(path).ok().and_then(|p| p.parent().map(Path::to_path_buf));
         Self::read_json(&text, true, dir.as_deref())
     }
+}
+
+/// A local file's bytes, refused past `max`. Only a regular file is opened: a device such as
+/// `/dev/zero` reports no size and never ends, and opening a named pipe waits for a writer.
+/// Reading stops a byte past `max`, so a file growing as it is read can't exhaust memory either.
+pub(crate) fn read_file(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} isn't a file", path.display()));
+    }
+    let too_large = || format!("{} is too large (maximum {} MiB)", path.display(), max >> 20);
+    if meta.len() > max {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(max.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() as u64 > max {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 fn empty_map() -> &'static Map {

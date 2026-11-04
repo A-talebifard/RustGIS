@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/rustgis", "apps/rustgis-cli", "xtask"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.90"
@@ -62,7 +62,7 @@ tiff = "0.11"
 weezl = "0.2"
 # The tests' Zstandard-compressed GeoTIFFs (the version the tiff crate decodes with).
 zstd = { version = "0.14", default-features = false }
-proj4rs = { version = "0.2", default-features = false }
+proj4rs = { version = "0.3", default-features = false }
 crs-definitions = { version = "0.6", default-features = false, features = ["proj4"] }
 base64 = "0.23"
 # Deflate for PDF image streams.

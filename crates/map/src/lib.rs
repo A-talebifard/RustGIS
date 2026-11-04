@@ -12,6 +12,7 @@ pub mod geolibre;
 mod geometry_kinds;
 pub mod globe;
 pub mod graphics;
+pub mod label_by;
 pub mod layout;
 pub mod lod;
 pub mod palette;
@@ -37,8 +38,8 @@ pub use diagram::{DiagramCategory, DiagramKind, DiagramLabel, DiagramSettings, D
 pub use globe::{Globe, Projection};
 pub use raster::{RasterDefaults, RasterLayer, RasterRenderer, RasterStyle, Resampling, Stretch};
 pub use symbology::{
-    ClassMethod, FontName, Glyph, LabelBackground, LabelClass, LabelKey, LabelMatcher, LabelPlacement, Labeling, LineCap, LineJoin,
-    LineMark, LineMarkers, LineStroke, Marker, MarkerRotation, Placements, Renderer, Symbol,
+    ClassMethod, Classer, FontName, Glyph, LabelBackground, LabelClass, LabelKey, LabelMatcher, LabelPlacement, Labeling, LineCap,
+    LineJoin, LineMark, LineMarkers, LineStroke, Marker, MarkerRotation, Placements, Renderer, Symbol,
 };
 pub use tiles::{TileKind, TileLayer};
 
@@ -98,6 +99,16 @@ impl Basemap {
             Basemap::Blank => (Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::rgb(0xFF, 0xFF, 0xFF), Rgba::new(0, 0, 0, 0), Rgba::new(0, 0, 0, 0)),
         }
     }
+}
+
+/// How No Fill hid a layer's polygon fills ([`Layer::no_fill`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoFill {
+    /// One transparent fill over every symbol: on streamed layers and layers with points or lines,
+    /// whose symbols those share.
+    Override,
+    /// Every symbol's fill made transparent.
+    Symbols,
 }
 
 /// A layer: a dataset drawn with a renderer and labels.
@@ -160,6 +171,10 @@ pub struct Layer {
     /// [`fills::FillLayer`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "fills::de_fills")]
     pub fill_layers: Vec<fills::FillLayer>,
+    /// How No Fill hides the polygon fills, while it is on: a new symbology, a fill colour or a
+    /// fill in the symbol's colour shows them again. A fill colour chosen transparent isn't this.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_no_fill")]
+    pub no_fill: Option<NoFill>,
     /// Draws the stacked strokes in levels (symbol levels): every feature's strokes of one
     /// [`LineStroke::level`] before any of the next, so road casings join under the cores
     /// instead of cutting across them where lines meet.
@@ -341,6 +356,8 @@ impl Layer {
         if let Some(info) = src.info() {
             self.dataset.fields = info.fields.clone();
             self.dataset.crs = info.coordinate_system();
+            // The new source's Z and M, which reading it drops (see `Dataset::zm_dropped`).
+            self.dataset.zm_dropped = info.zm_dropped;
         }
         self.dataset.source = src.linked_file().map(String::from);
         self.source = Some(src);
@@ -381,6 +398,7 @@ impl Layer {
             extrusion: None,
             line_strokes: Vec::new(),
             fill_layers: Vec::new(),
+            no_fill: None,
             stroke_levels: false,
             marker_rotation: None,
             diagram: None,
@@ -476,6 +494,12 @@ impl Layer {
         {
             self.dataset.fields = info.fields.clone();
         }
+        // An opened source's dropped Z or M values, for a project saved without the mark. Added to,
+        // not replaced: a source that couldn't tell (a check that timed out) mustn't clear a mark the
+        // project kept, and a stale one gives one notice too many rather than one too few.
+        if let Some(info) = self.source.as_ref().and_then(|s| s.info()) {
+            self.dataset.zm_dropped |= info.zm_dropped;
+        }
         let Some(src) = &mut self.source else { return false };
         src.window_fields = Some(self.dataset.fields.len());
         // A failed read leaves nothing drawn for it (its error shows in Layers), not the
@@ -551,7 +575,46 @@ impl Layer {
     /// Every feature of a streamed layer's source (up to the read limit), for tools and for
     /// loading the layer into memory.
     pub fn load_all(&self) -> Result<Dataset, String> {
-        let Some(src) = &self.source else { return Ok(self.dataset.clone()) };
+        self.load_all_counted().map(|(ds, _)| ds)
+    }
+
+    /// [`Layer::load_all`], with the number of rows of the source that couldn't be read.
+    pub fn load_all_counted(&self) -> Result<(Dataset, usize), String> {
+        let Some(copy) = self.open_source()? else { return Ok((self.dataset.clone(), 0)) };
+        let (mut ds, report) = copy.read_all()?;
+        ds.name = self.dataset.name.clone();
+        // (A project that lists no fields keeps the source's, as `sync_source` gives it.)
+        if !self.dataset.fields.is_empty() {
+            ds.fields = self.dataset.fields.clone();
+        }
+        ds.source = self.dataset.source.clone();
+        Ok((ds, report.skipped))
+    }
+
+    /// A streamed layer's source, to export whole a chunk at a time, with a dataset of no
+    /// features naming them as [`Layer::load_all`] would. `None` for a layer not
+    /// read in place, or whose source can't be read so (one by its web address).
+    pub fn chunk_export(&self) -> Result<Option<(std::sync::Arc<dyn rustgis_data::source::FeatureSource>, Dataset)>, String> {
+        let Some(copy) = self.open_source()? else { return Ok(None) };
+        let Some(src) = copy.visit_source() else { return Ok(None) };
+        let info = src.info();
+        let mut ds = Dataset::new(self.dataset.name.clone(), info.geometry_type, info.fields.clone());
+        ds.crs = info.coordinate_system();
+        // What reading the source drops, the export lacks (see `Dataset::zm_dropped`).
+        ds.zm_dropped = info.zm_dropped || self.dataset.zm_dropped;
+        if !self.dataset.fields.is_empty() {
+            ds.fields = self.dataset.fields.clone();
+        }
+        // (A source declaring no geometry type takes its first geometry's when exported, as a
+        // whole read does.)
+        ds.source = self.dataset.source.clone();
+        Ok(Some((src, ds)))
+    }
+
+    /// A copy of a streamed layer's source, opened (waiting for one still opening, as an export
+    /// does); `None` for a layer not read in place.
+    fn open_source(&self) -> Result<Option<source::SourceLayer>, String> {
+        let Some(src) = &self.source else { return Ok(None) };
         let mut copy = src.clone();
         if !copy.is_open() {
             copy.open()?;
@@ -565,14 +628,7 @@ impl Layer {
                     .unwrap_or_else(|| "the layer's source is still opening: try again once it has opened".into()));
             }
         }
-        let (mut ds, _) = copy.read_all()?;
-        ds.name = self.dataset.name.clone();
-        // (A project that lists no fields keeps the source's, as `sync_source` gives it.)
-        if !self.dataset.fields.is_empty() {
-            ds.fields = self.dataset.fields.clone();
-        }
-        ds.source = self.dataset.source.clone();
-        Ok(ds)
+        Ok(Some(copy))
     }
 
     /// The symbol a row draws with.
@@ -655,6 +711,16 @@ impl Layer {
             return (symbol, strokes, self.fills(row));
         }
         let (symbol, strokes, fills) = self.renderer.style_fills_for(&self.dataset, row);
+        (symbol, strokes.unwrap_or(&self.line_strokes), fills.unwrap_or(&self.fill_layers))
+    }
+
+    /// [`Layer::style_and_fills`] with its renderer's class expression compiled (`c`, from
+    /// [`Renderer::classer`]), as a drawing of many features takes it.
+    pub fn style_and_fills_with(&self, row: usize, c: &Classer) -> (Symbol, &[LineStroke], &[fills::FillLayer]) {
+        if self.graphics || self.renderer.expression().is_none() {
+            return self.style_and_fills(row);
+        }
+        let (symbol, strokes, fills) = self.renderer.style_fills_with(&self.dataset, row, c);
         (symbol, strokes.unwrap_or(&self.line_strokes), fills.unwrap_or(&self.fill_layers))
     }
 
@@ -959,10 +1025,10 @@ impl Layer {
         let query = self.definition_query.as_deref().is_some_and(|q| !q.trim().is_empty());
         let timed = self.time.as_ref().is_some_and(|t| t.window.is_some());
         if !query && !timed && self.display_filters.is_empty() {
-            return (!self.dataset.features.is_empty()).then(|| self.renderer.legend_for(&self.dataset, &[]));
+            return (!self.dataset.features.is_empty()).then(|| self.renderer.legend_at(&self.dataset, &[], Some(scale)));
         }
         let rows = self.drawn_rows(scale);
-        rows.contains(&true).then(|| self.renderer.legend_for(&self.dataset, &rows))
+        rows.contains(&true).then(|| self.renderer.legend_at(&self.dataset, &rows, Some(scale)))
     }
 
     /// Rows passing the definition query (all rows when none or invalid).
@@ -1171,6 +1237,9 @@ pub struct Map {
     /// the map moves. Filled by the renderer.
     #[serde(skip)]
     pub label_lock: Option<Vec<(LabelKey, u8)>>,
+    /// Geographic anchors of locked non-repeated line labels. Render cache only, never saved.
+    #[serde(skip)]
+    pub label_lock_line_anchors: std::collections::HashMap<LabelKey, Coord>,
     /// Relationships, snapping, topology rules and edit settings.
     #[serde(default)]
     pub editing: design::MapEditing,
@@ -1195,6 +1264,9 @@ pub struct Map {
     pub body: String,
     #[serde(default)]
     next_layer_id: u32,
+    /// Process-local identity, kept by undo snapshots but never stored in a project.
+    #[serde(skip, default = "next_layer_instance")]
+    instance_id: u64,
 }
 
 fn earth() -> String {
@@ -1293,6 +1365,7 @@ impl Map {
             popup_mode: PopupMode::Topmost,
             label_display: LabelDisplay::default(),
             label_lock: None,
+            label_lock_line_anchors: Default::default(),
             editing: design::MapEditing::default(),
             swipe: None,
             view: view::ViewSettings::default(),
@@ -1301,7 +1374,18 @@ impl Map {
             time: None,
             body: earth(),
             next_layer_id: 1,
+            instance_id: next_layer_instance(),
         }
+    }
+
+    /// Identifies this live map, whatever its name or place among the project's maps.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Starts a distinct live map after copying one. Undo snapshots keep the original identity.
+    pub fn renew_instance_id(&mut self) {
+        self.instance_id = next_layer_instance();
     }
 
     /// Every address the map keeps to read its data again (service groups and their layers'
@@ -2427,6 +2511,13 @@ impl Map {
         (grey, grey, Rgba::new(0, 0, 0, 0), grat)
     }
 
+    /// Whether the built-in world outline is drawn: where the palette's land and water differ, so
+    /// not on the blank basemap or another body.
+    pub fn draws_world_outline(&self) -> bool {
+        let (water, land, ..) = self.palette();
+        land != water
+    }
+
     /// Ground metres on the map's body per map unit at a point in map coordinates.
     pub fn ground_per_unit(&self, at: Coord) -> f64 {
         self.flat().ground_per_unit(at) * self.body().ratio()
@@ -2593,6 +2684,21 @@ pub const REFERENCE_SCALES: (f64, f64) = (1.0, 1e9);
 /// The most a reference scale shrinks or grows a layer's sizes ([`Layer::size_factor`]): zoomed
 /// far in, its lines would otherwise be drawn thousands of pixels wide.
 pub const SIZE_FACTORS: (f64, f64) = (0.01, 32.0);
+
+/// A [`Layer::no_fill`] this version doesn't know (a later variant, another type, or edited by
+/// hand) reads as off, rather than failing the whole project.
+fn de_no_fill<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NoFill>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Read {
+        Known(NoFill),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Read>::deserialize(d)? {
+        Some(Read::Known(how)) => Some(how),
+        Some(Read::Other(_)) | None => None,
+    })
+}
 
 /// Reads a layer's reference scale as `layer.referenceScale` would leave it: one out of
 /// [`REFERENCE_SCALES`] (or not a number) is none. A project file is hostile input.
@@ -2822,6 +2928,28 @@ mod tests {
     }
 
     #[test]
+    fn no_fill_is_saved_only_when_on_and_an_unknown_one_reads_as_off() {
+        let mut l = Layer::new(1, Dataset::new("parcels", GeometryType::Polygon, vec![]));
+        assert!(!serde_json::to_string(&l).unwrap().contains("no_fill"));
+        for how in [NoFill::Override, NoFill::Symbols] {
+            l.no_fill = Some(how);
+            let text = serde_json::to_string(&l).unwrap();
+            assert_eq!(serde_json::from_str::<Layer>(&text).unwrap().no_fill, Some(how));
+        }
+        let mut v = serde_json::to_value(&l).unwrap();
+        for unknown in [
+            serde_json::json!("Later"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!({"Override": 1}),
+            serde_json::Value::Null,
+        ] {
+            v["no_fill"] = unknown.clone();
+            assert_eq!(serde_json::from_value::<Layer>(v.clone()).unwrap().no_fill, None, "{unknown}");
+        }
+    }
+
+    #[test]
     fn hostile_class_strokes_in_a_project_are_brought_into_range() {
         // The same for a class's own strokes, Unique Values' (and <all other values>') and
         // Graduated Colors'; a class listed with none is dropped.
@@ -2843,6 +2971,7 @@ mod tests {
             other_strokes: wild.clone(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let back: Layer = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         let Renderer::Unique { class_strokes, other_strokes, .. } = &back.renderer else { panic!("unique renderer expected") };
@@ -3319,6 +3448,7 @@ mod tests {
             other_strokes: Vec::new(),
             class_fills: Default::default(),
             other_fills: Vec::new(),
+            expression: None,
         };
         let labels = |l: &Layer, scale| l.shown_legend(scale).map(|v| v.into_iter().map(|e| e.label).collect::<Vec<_>>());
         assert_eq!(labels(l, 1e6), Some(vec!["1".to_string(), "2".to_string()]), "no 9, no <all other values>");

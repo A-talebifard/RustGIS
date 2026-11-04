@@ -617,6 +617,11 @@ impl SourceLayer {
         Ok(new)
     }
 
+    /// A source that can be read whole a chunk at a time, for an export.
+    pub fn visit_source(&self) -> Option<Arc<dyn FeatureSource>> {
+        self.handle.as_ref().filter(|h| h.visits_chunks()).cloned()
+    }
+
     /// A source capable of a complete, ordered render traversal.
     pub fn chunk_source(&self) -> Option<Arc<dyn FeatureSource>> {
         self.handle.as_ref().filter(|h| h.streams_chunks()).cloned()
@@ -1001,7 +1006,11 @@ impl SourceLayer {
         };
         #[cfg(not(target_arch = "wasm32"))]
         if !block {
+            // The read's requests (a remote FlatGeobuf's or GeoParquet's ranges) belong to the
+            // session that asked for it: its diagnostics capture goes with the thread.
+            let capture = rustgis_data::diagnostics::Capture::current();
             let spawned = std::thread::Builder::new().name("rustgis-source".into()).spawn(move || {
+                let _diagnostics = capture.enter();
                 job();
                 GENERATION.fetch_add(1, Ordering::Relaxed);
                 if let Some(w) = waker().lock().ok().and_then(|w| w.clone()) {
