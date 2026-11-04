@@ -211,6 +211,13 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         "kind": l.diagram.as_ref().map(|d| d.kind.label().to_lowercase()),
         "fields": l.diagram.iter().flat_map(|d| d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()}))).collect::<Vec<_>>(),
     });
+    // A range of sums given by hand is measured from the data instead: say so when they differ.
+    let given = |key: &str| p.get("size").filter(|v| v.is_object()).and_then(|v| v.get(key)).and_then(Value::as_f64);
+    if let Some(DiagramSize::Scaled { min, max, .. }) = l.diagram.as_ref().map(|d| d.size)
+        && (given("min").is_some_and(|g| g != min) || given("max").is_some_and(|g| g != max))
+    {
+        s.notify(format!("size's min and max are measured from the data ({min} to {max}), not set: the ones given are not used"), false);
+    }
     if skipped_total > 0 {
         // A streamed layer's features are the view's, so the count covers only those read so far.
         let scope = if streamed { " (only the features read so far)" } else { "" };
@@ -376,9 +383,16 @@ mod tests {
             s.run("layer.diagram", &json!({"kind": "bar", "fields": ["pop_male", "pop_female"], "size": size})).unwrap();
             let before = s.map().layer(id).unwrap().diagram.clone();
             let info = s.run("layer.diagramInfo", &json!({})).unwrap();
+            let mark = s.notice_mark();
             s.run("layer.diagram", &info).unwrap();
             assert_eq!(s.map().layer(id).unwrap().diagram, before, "{size} reads back to the same diagram");
+            assert!(s.notices_since(mark).is_empty(), "its own range is the one measured, so nothing to say");
         }
+        // A range set by hand is not used, and that is said.
+        let mark = s.notice_mark();
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male", "pop_female"], "size": {"min": 0, "max": 500}})).unwrap();
+        let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+        assert!(said.iter().any(|t| t.starts_with("size's min and max are measured from the data")), "{said:?}");
     }
 
     #[test]

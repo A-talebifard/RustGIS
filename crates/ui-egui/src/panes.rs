@@ -4588,7 +4588,9 @@ fn held_drag(ui: &mut Ui, id: egui::Id, v: &mut f32, range: std::ops::RangeInclu
         ui.data_mut(|d| d.insert_temp(id, *v));
     }
     let done = (r.drag_stopped() || r.lost_focus()) && ui.data(|d| d.get_temp::<f32>(id)).is_some();
-    if done {
+    // A number held from an edit the widget left mid-way (its layer switched away while typing) is
+    // dropped once the widget is drawn again unedited, so the diagram's own number shows.
+    if done || (!r.dragged() && !r.has_focus() && !r.changed()) {
         ui.data_mut(|d| d.remove_temp::<f32>(id));
     }
     done
