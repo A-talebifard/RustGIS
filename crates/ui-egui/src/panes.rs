@@ -4394,7 +4394,9 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             let mut field = c.field.clone();
             egui::ComboBox::from_id_salt(("diagram_field", i)).selected_text(&field).width(140.0).show_ui(ui, |ui| {
                 for f in numeric {
-                    if ui.selectable_label(*f == field, f).clicked() {
+                    // A field another row draws is not offered twice (the command refuses it).
+                    let taken = d.categories.iter().enumerate().any(|(j, o)| j != i && o.field.eq_ignore_ascii_case(f));
+                    if ui.add_enabled(!taken, egui::Button::selectable(*f == field, f.as_str())).clicked() {
                         field = f.clone();
                     }
                 }
@@ -4471,8 +4473,10 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
                 }
             }
             DiagramSize::Scaled { ref mut min_size, ref mut max_size, .. } => {
-                let lo = held_drag(ui, ui.make_persistent_id(("diagram-size-min", key)), min_size, 1.0..=200.0, " pt", None);
-                let hi = held_drag(ui, ui.make_persistent_id(("diagram-size-max", key)), max_size, 1.0..=200.0, " pt", None);
+                // Each bound stops at the other, so the pair never crosses (the command refuses that).
+                let (from, to) = (*min_size, *max_size);
+                let lo = held_drag(ui, ui.make_persistent_id(("diagram-size-min", key)), min_size, 1.0..=to, " pt", None);
+                let hi = held_drag(ui, ui.make_persistent_id(("diagram-size-max", key)), max_size, from..=200.0, " pt", None);
                 changed = lo || hi;
             }
         }

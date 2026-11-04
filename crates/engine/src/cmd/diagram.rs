@@ -30,7 +30,7 @@ pub fn commands() -> Vec<C> {
         C::new("layer.diagramInfo", "Diagram Settings", "Style › Drawing", info)
             .view()
             .when(need_feature_layer)
-            .params(r#"{"layer"?: name|id} → {"kind", "fields": [{"field", "color"}], "size", "startAngle"?, "labels", "background"?, "outline"} or null without one"#),
+            .params(r#"{"layer"?: name|id} → {"kind", "fields": [{"field", "color"}], "size": points (fixed) | {"from", "to", "min", "max"} (scaled; min and max are the range of sums it was measured over), "startAngle"?, "labels", "background"?, "outline"} or null without one (layer.diagram takes it back as it is)"#),
     ]
 }
 
@@ -66,11 +66,20 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
             }
             _ => return Err("each field is a name, or {\"field\": name, \"color\"?: \"#RRGGBB\"}".into()),
         };
+        // A field listed twice would draw two equal slices, halving each share.
+        if asked.iter().any(|(f, _)| f.eq_ignore_ascii_case(&field)) {
+            return Err(format!("'{field}' is listed twice: each field is one slice or bar"));
+        }
         asked.push((field, colour));
     }
     let size = match p.get("size") {
         None | Some(Value::Null) => Asked::Scaled(6.0, 40.0),
-        Some(v @ Value::Object(_)) => {
+        Some(v @ Value::Object(o)) => {
+            // `min` and `max` are the data range layer.diagramInfo reads back: recomputed here, so
+            // its output can be sent back as it is. Any other key is a mistake, not the default.
+            if let Some(key) = o.keys().find(|k| !matches!(k.as_str(), "from" | "to" | "min" | "max")) {
+                return Err(format!("size takes from and to in points, not '{key}'"));
+            }
             // A bound given must be a number (or a numeric string, as `f` reads them) from 1 to 200
             // points: a bad one is an error, not the default or the nearest bound.
             let bound = |key: &str, default: f32| match v.get(key) {
@@ -225,10 +234,9 @@ fn info(s: &mut Session, p: &Value) -> CmdResult {
         "kind": d.kind.label().to_lowercase(),
         "fields": d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect::<Vec<_>>(),
         "size": match d.size {
-            DiagramSize::Fixed(s) => json!({"fixed": s}),
-            DiagramSize::Scaled { min_size, max_size, min, max } => {
-                json!({"scaled": {"from": min_size, "to": max_size, "min": min, "max": max}})
-            }
+            // The shapes layer.diagram takes, so this can be sent back as it is.
+            DiagramSize::Fixed(s) => json!(s),
+            DiagramSize::Scaled { min_size, max_size, min, max } => json!({"from": min_size, "to": max_size, "min": min, "max": max}),
         },
         "startAngle": d.start_angle,
         "labels": d.labels.code(),
@@ -348,6 +356,28 @@ mod tests {
         let d = s.map().layer(id).unwrap().diagram.clone().expect("set");
         assert!(matches!(d.size, DiagramSize::Scaled { min_size: 1.0, max_size: 200.0, .. }));
         assert_eq!(d.stroke_width, 8.0);
+    }
+
+    #[test]
+    fn a_repeated_field_or_an_unknown_size_key_is_refused() {
+        let (mut s, id) = regions();
+        assert!(s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male", "POP_MALE"]})).is_err(), "a field twice");
+        for size in [json!({"form": 18}), json!({"fixed": 12}), json!({"scaled": {"from": 6}})] {
+            assert!(s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": size})).is_err(), "{size} is refused");
+        }
+        assert!(s.map().layer(id).unwrap().diagram.is_none(), "refused, so unset");
+    }
+
+    #[test]
+    fn diagram_info_can_be_sent_back_as_it_is() {
+        let (mut s, id) = regions();
+        for size in [json!(18), json!({"from": 8, "to": 30})] {
+            s.run("layer.diagram", &json!({"kind": "bar", "fields": ["pop_male", "pop_female"], "size": size})).unwrap();
+            let before = s.map().layer(id).unwrap().diagram.clone();
+            let info = s.run("layer.diagramInfo", &json!({})).unwrap();
+            s.run("layer.diagram", &info).unwrap();
+            assert_eq!(s.map().layer(id).unwrap().diagram, before, "{size} reads back to the same diagram");
+        }
     }
 
     #[test]
