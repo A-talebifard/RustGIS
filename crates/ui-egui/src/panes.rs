@@ -4431,7 +4431,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     }
     if d.categories.len() < MAX_CATEGORIES.min(numeric.len()) && ui.small_button(tl!("＋ Add field")).clicked() {
         let taken: Vec<&str> = d.categories.iter().map(|c| c.field.as_str()).collect();
-        if let Some(next) = numeric.iter().find(|f| !taken.contains(&f.as_str())) {
+        if let Some(next) = numeric.iter().find(|f| !taken.iter().any(|t| t.eq_ignore_ascii_case(f))) {
             let i = d.categories.len();
             let mut cats: Vec<Value> = d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect();
             cats.push(json!({"field": next, "color": CATEGORY_COLORS[i % CATEGORY_COLORS.len()].hex()}));

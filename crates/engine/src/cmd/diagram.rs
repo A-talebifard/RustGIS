@@ -193,16 +193,7 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
                 stroke_width,
                 labels,
             };
-            let mut min = f64::INFINITY;
-            let mut max = f64::NEG_INFINITY;
-            let fields = probe.field_indices(&l.dataset);
-            for row in 0..l.dataset.features.len() {
-                if let Some((_, total)) = probe.values_at(&l.dataset, row, &fields) {
-                    min = min.min(total);
-                    max = max.max(total);
-                }
-            }
-            let (min, max) = if max >= min && min.is_finite() && max.is_finite() { (min, max) } else { (0.0, 1.0) };
+            let (min, max) = sum_range(&probe, &l.dataset);
             DiagramSize::Scaled { min_size, max_size, min, max }
         }
     };
@@ -231,6 +222,21 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         );
     }
     Ok(out)
+}
+
+/// The range of the categories' sums over `ds`'s features, which a scaled size grows over: (0, 1)
+/// when no feature has a chart to draw.
+pub(crate) fn sum_range(d: &DiagramSettings, ds: &rustgis_data::Dataset) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let fields = d.field_indices(ds);
+    for row in 0..ds.features.len() {
+        if let Some((_, total)) = d.values_at(ds, row, &fields) {
+            min = min.min(total);
+            max = max.max(total);
+        }
+    }
+    if max >= min && min.is_finite() && max.is_finite() { (min, max) } else { (0.0, 1.0) }
 }
 
 /// The layer's diagram settings, or null without one.
@@ -374,6 +380,32 @@ mod tests {
             assert!(s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": size})).is_err(), "{size} is refused");
         }
         assert!(s.map().layer(id).unwrap().diagram.is_none(), "refused, so unset");
+    }
+
+    #[test]
+    fn deleting_a_charted_field_drops_its_slice_and_says_so() {
+        let (mut s, id) = regions();
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male", "pop_female"]})).unwrap();
+        let mark = s.notice_mark();
+        s.run("edit.deleteField", &json!({"field": "POP_MALE"})).unwrap();
+        let d = s.map().layer(id).unwrap().diagram.clone().expect("one field is left");
+        assert_eq!(d.categories.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(), ["pop_female"]);
+        // The range of sums is measured again, over pop_female alone.
+        let DiagramSize::Scaled { max, .. } = d.size else { panic!("still scaled") };
+        assert!(max < 75_000.0, "measured without the deleted field: {max}");
+        assert_eq!(s.notices_since(mark).len(), 1, "said once");
+        // The last field goes, and the diagram with it.
+        let mark = s.notice_mark();
+        s.run("edit.deleteField", &json!({"field": "pop_female"})).unwrap();
+        assert!(s.map().layer(id).unwrap().diagram.is_none());
+        let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+        assert!(said.iter().any(|t| t.contains("diagram drew only the deleted field")), "{said:?}");
+        // Deleting a field no diagram draws says nothing about a diagram.
+        let (mut s, _) = regions();
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"]})).unwrap();
+        let mark = s.notice_mark();
+        s.run("edit.deleteField", &json!({"field": "pop_female"})).unwrap();
+        assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("diagram")));
     }
 
     #[test]
