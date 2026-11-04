@@ -163,7 +163,8 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         let skipped = (0..l.dataset.features.len())
             .filter(|&row| {
                 let v = l.dataset.value(row, fi);
-                !v.is_null() && !v.as_f64().is_some_and(|x| x > 0.0)
+                // As `values_at` draws them: a positive, finite number (an infinite one is dropped).
+                !v.is_null() && !v.as_f64().is_some_and(|x| x.is_finite() && x > 0.0)
             })
             .count();
         if skipped > 0 {
@@ -401,5 +402,15 @@ mod tests {
         s.run("layer.diagram", &json!({"kind": "bar", "fields": ["net", "gain"]})).unwrap();
         let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
         assert_eq!(said, ["2 value(s) in 1 field(s) ('net') are zero, negative or not numbers, and are not drawn"]);
+        // An infinite value is not drawn either, so it is counted.
+        let mut ds = Dataset::new("Spikes", GeometryType::Polygon, vec![Field::new("v", FieldType::Double)]);
+        ds.push(None, vec![Value::Float(f64::INFINITY)]);
+        ds.push(None, vec![Value::Float(5.0)]);
+        let id = s.map_mut().add_dataset(ds);
+        s.active_layer = Some(id);
+        let mark = s.notice_mark();
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["v"], "size": 12})).unwrap();
+        let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(said, ["1 value(s) in 1 field(s) ('v') are zero, negative or not numbers, and are not drawn"]);
     }
 }

@@ -47,7 +47,8 @@ pub(crate) fn draw(
 /// How far from its anchor any feature's diagram reaches, in points (for culling): the largest
 /// size its settings draw (a bar chart's half width, its background's margin included, for many
 /// bars), half its outline, plus what a value label takes when labels are on. A label is centred 7
-/// points past the crust and runs about 25 points to either side (`52K (52%)`), so 40 reaches it.
+/// points past the crust; one beside a pie runs outward from there, about 54 points for a long one
+/// (`1,234K (12.3%)` at 7 points), so 60 reaches its last letter.
 pub(crate) fn reach(d: &DiagramSettings) -> f32 {
     let size = d.max_size();
     let chart = match d.kind {
@@ -58,7 +59,7 @@ pub(crate) fn reach(d: &DiagramSettings) -> f32 {
             (size / 2.0 * (1.0 + (n - 1.0) / 16.0) + size / 16.0).max(size)
         }
     };
-    chart + d.stroke_width / 2.0 + if d.labels.is_none() { 0.0 } else { 40.0 }
+    chart + d.stroke_width / 2.0 + if d.labels.is_none() { 0.0 } else { 60.0 }
 }
 
 /// Where a feature's diagram sits: the point itself, a line's middle, or a polygon's interior
