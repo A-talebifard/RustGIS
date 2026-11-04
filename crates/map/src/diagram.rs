@@ -173,10 +173,14 @@ impl DiagramSettings {
                 max: if max.is_finite() { max } else { 1.0 },
             },
         };
-        if let DiagramSize::Scaled { min_size, max_size, .. } = &mut self.size
-            && *min_size > *max_size
-        {
-            std::mem::swap(min_size, max_size);
+        if let DiagramSize::Scaled { min_size, max_size, min, max } = &mut self.size {
+            if *min_size > *max_size {
+                std::mem::swap(min_size, max_size);
+            }
+            // A data range stored upside down would size every feature at the middle.
+            if *min > *max {
+                std::mem::swap(min, max);
+            }
         }
         // A range too wide for an f64 (its span infinite) would make the sizes not numbers.
         if let DiagramSize::Scaled { min, max, .. } = &mut self.size
@@ -351,6 +355,15 @@ mod tests {
         let DiagramSize::Scaled { min, max, .. } = d.size else { panic!("still scaled") };
         assert_eq!((min, max), (0.0, 1.0), "its span would be infinite, so the neutral range");
         assert!(d.size_for(1e308).is_finite(), "no size is not a number");
+    }
+
+    #[test]
+    fn a_data_range_stored_upside_down_is_put_in_order() {
+        let d =
+            DiagramSettings { size: DiagramSize::Scaled { min_size: 4.0, max_size: 36.0, min: 100.0, max: 0.0 }, ..settings() }.clamped();
+        let DiagramSize::Scaled { min, max, .. } = d.size else { panic!("still scaled") };
+        assert_eq!((min, max), (0.0, 100.0));
+        assert_eq!(d.size_for(100.0), 36.0, "the sizes still scale, not all the middle");
     }
 
     #[test]

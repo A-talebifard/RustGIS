@@ -3,7 +3,7 @@
 //! the renderer commands in `layer` (a diagram goes on top of the renderer's own symbol).
 
 use rustgis_data::GeometryType;
-use rustgis_map::diagram::{CATEGORY_COLORS, MAX_CATEGORIES, MAX_SIZE, MIN_SIZE};
+use rustgis_map::diagram::{CATEGORY_COLORS, MAX_CATEGORIES, MAX_SIZE, MAX_STROKE_WIDTH, MIN_SIZE};
 use rustgis_map::{DiagramCategory, DiagramKind, DiagramLabel, DiagramSettings, DiagramSize, Rgba};
 use serde_json::{Value, json};
 
@@ -71,13 +71,20 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
     let size = match p.get("size") {
         None | Some(Value::Null) => Asked::Scaled(6.0, 40.0),
         Some(v @ Value::Object(_)) => {
-            // A bound given must be a number (or a numeric string, as `f` reads them): a bad one is
-            // an error, not the default.
+            // A bound given must be a number (or a numeric string, as `f` reads them) from 1 to 200
+            // points: a bad one is an error, not the default or the nearest bound.
             let bound = |key: &str, default: f32| match v.get(key) {
                 None | Some(Value::Null) => Ok(default),
-                Some(_) => f(v, key).map(|x| x as f32).ok_or("size's from and to are points"),
+                Some(_) => f(v, key)
+                    .filter(|x| (f64::from(MIN_SIZE)..=f64::from(MAX_SIZE)).contains(x))
+                    .map(|x| x as f32)
+                    .ok_or("size's from and to are points from 1 to 200"),
             };
-            Asked::Scaled(bound("from", 6.0)?, bound("to", 40.0)?)
+            let (from, to) = (bound("from", 6.0)?, bound("to", 40.0)?);
+            if from > to {
+                return Err("size's from is no more than its to".into());
+            }
+            Asked::Scaled(from, to)
         }
         Some(_) => Asked::Fixed(
             f(p, "size")
@@ -105,7 +112,9 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
             },
             match v.get("width") {
                 None | Some(Value::Null) => DiagramSettings::default_stroke_width(),
-                Some(_) => f(v, "width").filter(|w| *w >= 0.0).ok_or("outline's width is points, zero or more")? as f32,
+                Some(_) => f(v, "width")
+                    .filter(|w| (0.0..=f64::from(MAX_STROKE_WIDTH)).contains(w))
+                    .ok_or("outline's width is points from 0 to 8")? as f32,
             },
         ),
         Some(_) => return Err("outline is {\"color\"?, \"width\"?: points}".into()),
@@ -315,6 +324,30 @@ mod tests {
         s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": {"from": "18", "to": 40}})).unwrap();
         let d = s.map().layer(id).unwrap().diagram.clone().expect("set");
         assert!(matches!(d.size, DiagramSize::Scaled { min_size, .. } if min_size == 18.0));
+    }
+
+    #[test]
+    fn a_size_or_outline_out_of_range_is_refused_not_clamped() {
+        let (mut s, id) = regions();
+        let base = json!({"kind": "pie", "fields": ["pop_male"]});
+        for (key, value) in [
+            ("size", json!({"from": 0.2})),
+            ("size", json!({"to": 500})),
+            ("size", json!({"from": 30, "to": 10})),
+            ("outline", json!({"width": 20})),
+            ("outline", json!({"width": -1})),
+        ] {
+            let mut p = base.clone();
+            p[key] = value.clone();
+            assert!(s.run("layer.diagram", &p).is_err(), "{key} {value} is refused, not moved into range");
+        }
+        assert!(s.map().layer(id).unwrap().diagram.is_none(), "refused, so unset");
+        // The bounds themselves are drawn.
+        s.run("layer.diagram", &json!({"kind": "pie", "fields": ["pop_male"], "size": {"from": 1, "to": 200}, "outline": {"width": 8}}))
+            .unwrap();
+        let d = s.map().layer(id).unwrap().diagram.clone().expect("set");
+        assert!(matches!(d.size, DiagramSize::Scaled { min_size: 1.0, max_size: 200.0, .. }));
+        assert_eq!(d.stroke_width, 8.0);
     }
 
     #[test]

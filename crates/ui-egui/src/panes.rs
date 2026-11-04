@@ -4386,7 +4386,9 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     // The categories: a field and its colour each, in draw order.
     ui.add_space(4.0);
     ui.label(egui::RichText::new(tl!("Fields")).size(11.5).color(t.text_dim));
-    let mut edited: Option<Vec<Value>> = None;
+    // The categories as edited, and the colour button's response when a colour picker made the
+    // edit (its drag is one undo step).
+    let mut edited: Option<(Vec<Value>, Option<egui::Response>)> = None;
     for (i, c) in d.categories.iter().enumerate() {
         ui.horizontal(|ui| {
             let mut field = c.field.clone();
@@ -4397,18 +4399,14 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
                     }
                 }
             });
-            // Built from the stored channels: a fully transparent colour keeps its colour, which a Color32 would lose.
-            let mut hsva = egui::ecolor::Hsva::from_srgb([c.colour.r(), c.colour.g(), c.colour.b()]);
-            hsva.a = f32::from(c.colour.a()) / 255.0;
-            let alpha = hsva.a;
             let mut cats: Vec<Value> = d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect();
             let mut changed = false;
-            if egui::color_picker::color_edit_button_hsva(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend).changed() {
-                let rgb = rustgis_engine::map::Rgba(hsva.to_srgba_unmultiplied());
-                // An opacity-only edit keeps the category's own channels, which the picker's rounding would change.
-                let picked = if hsva.a != alpha { c.colour.with_alpha(rgb.a()) } else { rgb };
+            let (resp, picked) = diagram_colour(ui, c.colour);
+            let mut press = None;
+            if let Some(picked) = picked {
                 cats[i]["color"] = json!(picked.hex());
                 changed = true;
+                press = Some(resp);
             }
             if field != c.field {
                 cats[i]["field"] = json!(field);
@@ -4419,11 +4417,14 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
                 changed = true;
             }
             if changed {
-                edited = Some(cats);
+                edited = Some((cats, press));
             }
         });
     }
-    if let Some(cats) = edited {
+    if let Some((cats, press)) = edited {
+        if let Some(resp) = press {
+            crate::widgets::one_step_per_press(app, &resp);
+        }
         apply(app, &d, cats);
     }
     if d.categories.len() < MAX_CATEGORIES.min(numeric.len()) && ui.small_button(tl!("＋ Add field")).clicked() {
@@ -4450,7 +4451,12 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
                     d2.size = DiagramSize::Fixed(12.0);
                     apply(app, &d2, d2.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
                 }
-                if ui.selectable_label(scaled, tl!("Scaled by sum")).clicked() && !scaled {
+                // A streamed layer holds the view's features only, so its range of sums is unknown.
+                let streamed = l.is_streamed();
+                let scaled_option = ui
+                    .add_enabled(!streamed, egui::Button::selectable(scaled, tl!("Scaled by sum")))
+                    .on_disabled_hover_text(tl!("A streamed layer needs Load All Features first"));
+                if scaled_option.clicked() && !scaled {
                     let mut d2 = d.clone();
                     d2.size = DiagramSize::Scaled { min_size: 6.0, max_size: 40.0, min: 0.0, max: 0.0 };
                     apply(app, &d2, d2.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
@@ -4515,19 +4521,22 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             d.background = on.then(|| rustgis_engine::map::Rgba::new(255, 255, 255, 204));
             apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
         } else if let Some(bg) = d.background {
-            let mut colour = crate::theme::c32(bg);
-            if crate::widgets::color_button(ui, &mut colour).changed() {
-                d.background = Some(picked_colour(colour, bg));
+            let (resp, picked) = diagram_colour(ui, bg);
+            if let Some(picked) = picked {
+                d.background = Some(picked);
+                crate::widgets::one_step_per_press(app, &resp);
                 apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
             }
         }
     });
     ui.horizontal(|ui| {
         ui.label(tl!("Outline"));
-        let mut colour = crate::theme::c32(d.stroke);
-        let mut changed = crate::widgets::color_button(ui, &mut colour).changed();
-        if changed {
-            d.stroke = picked_colour(colour, d.stroke);
+        let (resp, picked) = diagram_colour(ui, d.stroke);
+        let mut changed = false;
+        if let Some(picked) = picked {
+            d.stroke = picked;
+            changed = true;
+            crate::widgets::one_step_per_press(app, &resp);
         }
         let mut w = d.stroke_width;
         if held_drag(ui, ui.make_persistent_id(("diagram-outline-width", key)), &mut w, 0.0..=8.0, " pt", None) {
@@ -4540,11 +4549,24 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
     });
 }
 
-/// The colour a picker returned for `old`: an opacity-only edit keeps `old`'s own channels, which a
-/// fully transparent colour (a Color32, premultiplied) has lost.
-fn picked_colour(picked: egui::Color32, old: rustgis_engine::map::Rgba) -> rustgis_engine::map::Rgba {
-    let picked = crate::theme::rgba(picked);
-    if picked.a() == old.a() { picked } else { old.with_alpha(picked.a()) }
+/// A colour button in the Diagram section for the stored colour `old`, and the colour picked when
+/// it changed. The picker is built from `old`'s own channels, not a premultiplied Color32, so a
+/// fully transparent colour keeps its colour through an edit; and an opacity-only edit keeps
+/// `old`'s channels, which the picker's rounding would change.
+fn diagram_colour(ui: &mut Ui, old: rustgis_engine::map::Rgba) -> (egui::Response, Option<rustgis_engine::map::Rgba>) {
+    let mut hsva = egui::ecolor::Hsva::from_srgb([old.r(), old.g(), old.b()]);
+    hsva.a = f32::from(old.a()) / 255.0;
+    let alpha = hsva.a;
+    let resp = egui::color_picker::color_edit_button_hsva(ui, &mut hsva, egui::color_picker::Alpha::OnlyBlend);
+    let picked = resp.changed().then(|| picked_colour(hsva, alpha, old));
+    (resp, picked)
+}
+
+/// The colour a picker left at `hsva` for `old`, whose opacity was `alpha` when it opened: an
+/// opacity-only edit keeps `old`'s own channels; any other is the picker's colour, unpremultiplied.
+fn picked_colour(hsva: egui::ecolor::Hsva, alpha: f32, old: rustgis_engine::map::Rgba) -> rustgis_engine::map::Rgba {
+    let rgb = rustgis_engine::map::Rgba(hsva.to_srgba_unmultiplied());
+    if hsva.a != alpha { old.with_alpha(rgb.a()) } else { rgb }
 }
 
 /// A number dragged or typed in the Diagram section. It is held in the UI's memory while the drag
@@ -7759,7 +7781,8 @@ mod tests {
         let id = layer(&app, "Countries");
         app.session.active_layer = Some(id);
         app.ui.open_right(RightPane::Symbology);
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 1400.0)).with_max_steps(64).build_ui_state(
+        // Tall enough for the whole Symbology pane, its Diagram section included.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 2200.0)).with_max_steps(64).build_ui_state(
             |ui, app: &mut RustGisApp| {
                 let ctx = ui.ctx().clone();
                 app.logic(&ctx);
@@ -7789,6 +7812,21 @@ mod tests {
         assert_eq!(transparency(&h), mid, "letting go keeps the value");
         h.state_mut().run("edit.undo", Value::Null).unwrap();
         assert_eq!(transparency(&h), start, "one undo takes the whole drag back");
+    }
+
+    /// A diagram outline or background at zero opacity keeps a colour picked for it: raising the
+    /// opacity later shows that colour, not black. An opacity-only edit keeps the stored channels.
+    #[test]
+    fn a_transparent_diagram_colour_keeps_its_picked_rgb() {
+        use rustgis_engine::map::Rgba;
+        let old = Rgba::new(0x4D, 0x4D, 0x4D, 0);
+        let mut hsva = egui::ecolor::Hsva::from_srgb([200, 30, 40]);
+        hsva.a = 0.0;
+        let picked = picked_colour(hsva, 0.0, old);
+        assert_eq!((picked.r(), picked.g(), picked.b(), picked.a()), (200, 30, 40, 0), "the RGB picked at zero opacity is kept");
+        let mut raised = egui::ecolor::Hsva::from_srgb([200, 30, 40]);
+        raised.a = 1.0;
+        assert_eq!(picked_colour(raised, 0.0, picked), picked.with_alpha(255), "raising the opacity shows it");
     }
 
     /// Editing opacity must not turn a transparent red or a near-transparent colour into black.

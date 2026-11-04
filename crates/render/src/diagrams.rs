@@ -45,10 +45,20 @@ pub(crate) fn draw(
 }
 
 /// How far from its anchor any feature's diagram reaches, in points (for culling): the largest
-/// size its settings draw, plus what a value label takes when labels are on. A label is centred 7
+/// size its settings draw (a bar chart's half width, its background's margin included, for many
+/// bars), half its outline, plus what a value label takes when labels are on. A label is centred 7
 /// points past the crust and runs about 25 points to either side (`52K (52%)`), so 40 reaches it.
 pub(crate) fn reach(d: &DiagramSettings) -> f32 {
-    d.max_size() + if d.labels.is_none() { 0.0 } else { 40.0 }
+    let size = d.max_size();
+    let chart = match d.kind {
+        rustgis_map::DiagramKind::Pie => size,
+        rustgis_map::DiagramKind::Bar => {
+            // `bars`: n bars of size/n with n - 1 gaps of size/16, and a gap of margin each side.
+            let n = d.categories.len().max(1) as f32;
+            (size / 2.0 * (1.0 + (n - 1.0) / 16.0) + size / 16.0).max(size)
+        }
+    };
+    chart + d.stroke_width / 2.0 + if d.labels.is_none() { 0.0 } else { 40.0 }
 }
 
 /// Where a feature's diagram sits: the point itself, a line's middle, or a polygon's interior
@@ -133,7 +143,9 @@ fn pie(
             continue;
         }
         let to = from + sweep;
-        if let Some(p) = wedge(x, y, size, from, to) {
+        // A slice taking the whole turn is a disc: a full-turn wedge would stroke a spoke.
+        let slice = if sweep >= 360.0 { disc(x, y, size) } else { wedge(x, y, size, from, to) };
+        if let Some(p) = slice {
             if colour.a() > 0 {
                 pm.fill_path(&p, &paint(*colour, opacity), FillRule::Winding, Transform::identity(), None);
             }
@@ -424,6 +436,27 @@ mod tests {
         let mut bare = Canvas::new(96, 96).unwrap();
         draw(&mut bare, 48.0, 48.0, &settings(DiagramKind::Pie), &values, 100_000.0, 1.0, 1.0, false);
         assert!(paused.pixmap().data() == bare.pixmap().data(), "the chart draws as it would with no labels");
+    }
+
+    #[test]
+    fn a_pie_of_one_slice_is_a_disc_with_no_spoke() {
+        // A clear slice shows only its outline: a full-turn wedge would stroke a spoke from the
+        // centre north to the crust, through (32, 22).
+        let mut pm = Canvas::new(64, 64).unwrap();
+        let d = settings(DiagramKind::Pie);
+        draw(&mut pm, 32.0, 32.0, &d, &[(10.0, rustgis_map::Rgba::new(0, 0, 0, 0))], 10.0, 1.0, 1.0, false);
+        assert!(painted(&pm, 32, 12) || painted(&pm, 32, 13), "the crust is outlined");
+        assert!(!painted(&pm, 32, 22), "no spoke runs from the centre");
+    }
+
+    #[test]
+    fn reach_covers_a_wide_bar_chart_with_its_background() {
+        let categories = (0..16).map(|i| DiagramCategory { field: format!("f{i}"), colour: CATEGORY_COLORS[0] }).collect();
+        let d = DiagramSettings { categories, background: Some(rustgis_map::Rgba::new(255, 255, 255, 255)), ..settings(DiagramKind::Bar) };
+        // `bars` at size 20: 16 bars of 1.25 and 15 gaps of 1.25, so 38.75 wide, and a 1.25 margin
+        // each side: the box's edge is 20.625 from the anchor, past the size.
+        assert!(reach(&d) >= 20.625 + d.stroke_width / 2.0, "reach {} misses the box's edge", reach(&d));
+        assert!(reach(&settings(DiagramKind::Pie)) >= 20.0 + DiagramSettings::default_stroke_width() / 2.0);
     }
 
     #[test]
