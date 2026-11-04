@@ -136,8 +136,10 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         .map(|(i, (field, colour))| DiagramCategory { field, colour: colour.unwrap_or(CATEGORY_COLORS[i % CATEGORY_COLORS.len()]) })
         .collect();
     // A value a chart cannot draw (zero, negative, or not a number; a null is just missing) is left
-    // out of its feature's chart: say how many, per field.
-    let mut notes: Vec<String> = Vec::new();
+    // out of its feature's chart: say how many, and in which fields, in one notice.
+    let streamed = l.is_streamed();
+    let mut skipped_total = 0;
+    let mut skipped_fields: Vec<String> = Vec::new();
     for c in &categories {
         let Some(fi) = l.dataset.field_index(&c.field) else { continue };
         let skipped = (0..l.dataset.features.len())
@@ -147,7 +149,8 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
             })
             .count();
         if skipped > 0 {
-            notes.push(format!("{skipped} value(s) of '{}' are zero, negative or not numbers, and are not drawn", c.field));
+            skipped_total += skipped;
+            skipped_fields.push(format!("'{}'", c.field));
         }
     }
     // What each slice or bar says beside it: "none" (the default), "value", "percent" or "both".
@@ -173,8 +176,9 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
             };
             let mut min = f64::INFINITY;
             let mut max = f64::NEG_INFINITY;
+            let fields = probe.field_indices(&l.dataset);
             for row in 0..l.dataset.features.len() {
-                if let Some((_, total)) = probe.values(&l.dataset, row) {
+                if let Some((_, total)) = probe.values_at(&l.dataset, row, &fields) {
                     min = min.min(total);
                     max = max.max(total);
                 }
@@ -188,8 +192,17 @@ fn set(s: &mut Session, p: &Value) -> CmdResult {
         "kind": l.diagram.as_ref().map(|d| d.kind.label().to_lowercase()),
         "fields": l.diagram.iter().flat_map(|d| d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()}))).collect::<Vec<_>>(),
     });
-    for note in notes {
-        s.notify(note, false);
+    if skipped_total > 0 {
+        // A streamed layer's features are the view's, so the count covers only those read so far.
+        let scope = if streamed { " (only the features read so far)" } else { "" };
+        s.notify(
+            format!(
+                "{skipped_total} value(s) in {} field(s) ({}) are zero, negative or not numbers, and are not drawn{scope}",
+                skipped_fields.len(),
+                skipped_fields.join(", "),
+            ),
+            false,
+        );
     }
     Ok(out)
 }
@@ -324,6 +337,6 @@ mod tests {
         let mark = s.notice_mark();
         s.run("layer.diagram", &json!({"kind": "bar", "fields": ["net", "gain"]})).unwrap();
         let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).collect();
-        assert_eq!(said, ["2 value(s) of 'net' are zero, negative or not numbers, and are not drawn"]);
+        assert_eq!(said, ["2 value(s) in 1 field(s) ('net') are zero, negative or not numbers, and are not drawn"]);
     }
 }

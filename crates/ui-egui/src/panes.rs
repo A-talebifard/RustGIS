@@ -4337,6 +4337,8 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             app.session.notify(error, true);
         }
     };
+    // The held drafts are kept per layer of this map of this project: a layer id repeats across maps.
+    let key = crate::labelpane::layer_key(app, l);
 
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(tl!("Diagram")).size(11.5).color(t.text_dim))
@@ -4351,13 +4353,15 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             return;
         }
         ui.horizontal(|ui| {
+            // A streamed layer's sums are its view's, so a scaled size is refused: it starts fixed.
+            let size = if l.is_streamed() { json!(12.0) } else { Value::Null };
             if ui.button(tl!("Pie Chart")).clicked()
-                && let Err(error) = app.run("layer.diagram", json!({"kind": "pie", "fields": [numeric[0], numeric[1]]}))
+                && let Err(error) = app.run("layer.diagram", json!({"kind": "pie", "fields": [numeric[0], numeric[1]], "size": size}))
             {
                 app.session.notify(error, true);
             }
             if ui.button(tl!("Bar Chart")).clicked()
-                && let Err(error) = app.run("layer.diagram", json!({"kind": "bar", "fields": [numeric[0], numeric[1]]}))
+                && let Err(error) = app.run("layer.diagram", json!({"kind": "bar", "fields": [numeric[0], numeric[1]], "size": size}))
             {
                 app.session.notify(error, true);
             }
@@ -4452,14 +4456,14 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         let mut changed = false;
         match d.size {
             DiagramSize::Fixed(mut s) => {
-                if held_drag(ui, egui::Id::new(("diagram-size", l.id)), &mut s, 1.0..=200.0, " pt", None) {
+                if held_drag(ui, egui::Id::new(("diagram-size", key)), &mut s, 1.0..=200.0, " pt", None) {
                     d.size = DiagramSize::Fixed(s);
                     changed = true;
                 }
             }
             DiagramSize::Scaled { ref mut min_size, ref mut max_size, .. } => {
-                let lo = held_drag(ui, egui::Id::new(("diagram-size-min", l.id)), min_size, 1.0..=200.0, " pt", None);
-                let hi = held_drag(ui, egui::Id::new(("diagram-size-max", l.id)), max_size, 1.0..=200.0, " pt", None);
+                let lo = held_drag(ui, egui::Id::new(("diagram-size-min", key)), min_size, 1.0..=200.0, " pt", None);
+                let hi = held_drag(ui, egui::Id::new(("diagram-size-max", key)), max_size, 1.0..=200.0, " pt", None);
                 changed = lo || hi;
             }
         }
@@ -4473,7 +4477,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         ui.horizontal(|ui| {
             let mut a = d.start_angle;
             let input_label = ui.label(tl!("Start angle"));
-            if held_drag(ui, egui::Id::new(("diagram-start-angle", l.id)), &mut a, 0.0..=360.0, "°", Some(input_label.id)) {
+            if held_drag(ui, egui::Id::new(("diagram-start-angle", key)), &mut a, 0.0..=360.0, "°", Some(input_label.id)) {
                 d.start_angle = a;
                 apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
             }
@@ -4510,7 +4514,7 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         } else if let Some(bg) = d.background {
             let mut colour = crate::theme::c32(bg);
             if crate::widgets::color_button(ui, &mut colour).changed() {
-                d.background = Some(crate::theme::rgba(colour));
+                d.background = Some(picked_colour(colour, bg));
                 apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
             }
         }
@@ -4520,10 +4524,10 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
         let mut colour = crate::theme::c32(d.stroke);
         let mut changed = crate::widgets::color_button(ui, &mut colour).changed();
         if changed {
-            d.stroke = crate::theme::rgba(colour);
+            d.stroke = picked_colour(colour, d.stroke);
         }
         let mut w = d.stroke_width;
-        if held_drag(ui, egui::Id::new(("diagram-outline-width", l.id)), &mut w, 0.0..=8.0, " pt", None) {
+        if held_drag(ui, egui::Id::new(("diagram-outline-width", key)), &mut w, 0.0..=8.0, " pt", None) {
             d.stroke_width = w;
             changed = true;
         }
@@ -4531,6 +4535,13 @@ fn diagram_section(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, numeric: &[Stri
             apply(app, &d, d.categories.iter().map(|c| json!({"field": c.field, "color": c.colour.hex()})).collect());
         }
     });
+}
+
+/// The colour a picker returned for `old`: an opacity-only edit keeps `old`'s own channels, which a
+/// fully transparent colour (a Color32, premultiplied) has lost.
+fn picked_colour(picked: egui::Color32, old: rustgis_engine::map::Rgba) -> rustgis_engine::map::Rgba {
+    let picked = crate::theme::rgba(picked);
+    if picked.a() == old.a() { picked } else { old.with_alpha(picked.a()) }
 }
 
 /// A number dragged or typed in the Diagram section. It is held in the UI's memory while the drag

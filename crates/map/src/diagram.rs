@@ -162,8 +162,8 @@ impl DiagramSettings {
     /// Too large for an f32 (infinite once read) is the nearest bound, as a large value is.
     pub fn clamped(mut self) -> DiagramSettings {
         let fit = |v: f32, lo: f32, hi: f32| if v.is_nan() { lo } else { v.clamp(lo, hi) };
-        self.categories.truncate(MAX_CATEGORIES);
         self.categories.retain(|c| !c.field.trim().is_empty());
+        self.categories.truncate(MAX_CATEGORIES);
         self.size = match self.size {
             DiagramSize::Fixed(s) => DiagramSize::Fixed(fit(s, MIN_SIZE, MAX_SIZE)),
             DiagramSize::Scaled { min_size, max_size, min, max } => DiagramSize::Scaled {
@@ -177,6 +177,12 @@ impl DiagramSettings {
             && *min_size > *max_size
         {
             std::mem::swap(min_size, max_size);
+        }
+        // A range too wide for an f64 (its span infinite) would make the sizes not numbers.
+        if let DiagramSize::Scaled { min, max, .. } = &mut self.size
+            && !(*max - *min).is_finite()
+        {
+            (*min, *max) = (0.0, 1.0);
         }
         self.start_angle = if self.start_angle.is_finite() { self.start_angle.rem_euclid(360.0) } else { 0.0 };
         self.stroke_width = fit(self.stroke_width, 0.0, MAX_STROKE_WIDTH);
@@ -336,6 +342,29 @@ mod tests {
         assert_eq!((min, max), (0.0, 1.0), "not numbers become the neutral range");
         assert_eq!(d.start_angle, 5.0);
         assert_eq!(d.stroke_width, MAX_STROKE_WIDTH);
+    }
+
+    #[test]
+    fn a_scaled_range_too_wide_to_measure_is_reset() {
+        let d = DiagramSettings {
+            size: DiagramSize::Scaled { min_size: 4.0, max_size: 36.0, min: -1e308, max: 1e308 },
+            ..settings()
+        }
+        .clamped();
+        let DiagramSize::Scaled { min, max, .. } = d.size else { panic!("still scaled") };
+        assert_eq!((min, max), (0.0, 1.0), "its span would be infinite, so the neutral range");
+        assert!(d.size_for(1e308).is_finite(), "no size is not a number");
+    }
+
+    #[test]
+    fn a_category_without_a_name_does_not_cost_one_of_the_cap() {
+        let mut categories: Vec<DiagramCategory> = (0..MAX_CATEGORIES)
+            .map(|i| DiagramCategory { field: format!("f{i}"), colour: CATEGORY_COLORS[0] })
+            .collect();
+        categories.insert(0, DiagramCategory { field: " ".into(), colour: CATEGORY_COLORS[1] });
+        let d = DiagramSettings { categories, ..settings() }.clamped();
+        assert_eq!(d.categories.len(), MAX_CATEGORIES);
+        assert_eq!(d.categories.last().map(|c| c.field.as_str()), Some("f15"), "the last named category is kept");
     }
 
     #[test]

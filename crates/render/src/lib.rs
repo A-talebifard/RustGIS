@@ -3525,6 +3525,7 @@ fn render_frame(
                 && layer.aggregation.is_none()
                 && layer.extrusion.is_none()
                 && (!complete_source || thin_complete)
+                && layer.diagram.is_none()
                 && layer.prepare_display(&flat, thin_tol, complete_source);
             if globe.is_none() && !display_only {
                 if complete_source {

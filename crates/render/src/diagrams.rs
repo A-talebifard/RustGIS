@@ -54,7 +54,7 @@ pub(crate) fn reach(d: &DiagramSettings) -> f32 {
 pub(crate) fn anchor(g: &Geometry) -> Option<Coord> {
     match g {
         Geometry::Point(c) => Some(*c),
-        Geometry::MultiPoint(v) => v.first().copied(),
+        Geometry::MultiPoint(v) => v.iter().copied().find(|c| c.is_finite()),
         Geometry::Line(parts) => {
             let part = parts.iter().max_by_key(|p| p.len())?;
             let n = part.len();
@@ -137,12 +137,20 @@ fn pie(
             }
             stroke(pm, &p, d.stroke, d.stroke_width, opacity, ppp);
         }
-        // The label sits on the slice's mid-angle, just outside the crust.
+        // The label sits on the slice's mid-angle, just outside the crust: its near edge is there,
+        // so a label beside the pie (at 3 or 9 o'clock) runs away from it rather than onto it.
         if !paused && d.labels != DiagramLabel::None {
             let mid = (from + to) / 2.0 * std::f32::consts::PI / 180.0;
             let (dx, dy) = (mid.sin(), -mid.cos());
             let (lx, ly) = (x + dx * (size + 7.0 * ppp), y + dy * (size + 7.0 * ppp));
-            label_at(pm, lx, ly, d.labels, *v, total, ppp);
+            let align = if dx > 0.5 {
+                crate::text::Align::Left
+            } else if dx < -0.5 {
+                crate::text::Align::Right
+            } else {
+                crate::text::Align::Center
+            };
+            label_at(pm, lx, ly, d.labels, *v, total, ppp, align);
         }
         from = to;
     }
@@ -190,15 +198,16 @@ fn bars(
         }
         // The label sits above the bar's top, on the bar's centre line.
         if !paused && d.labels != DiagramLabel::None {
-            label_at(pm, at + bar / 2.0, baseline - h - 4.0 * ppp, d.labels, *v, total, ppp);
+            label_at(pm, at + bar / 2.0, baseline - h - 4.0 * ppp, d.labels, *v, total, ppp, crate::text::Align::Center);
         }
         at += bar + gap;
     }
 }
 
-/// Says a category's value, its percent of the total, or both, centred at (`x`, `y`) in a small
-/// haloed dark text (7 pt, as the map's finest labels are).
-fn label_at(pm: &mut Pixmap, x: f32, y: f32, mode: DiagramLabel, v: f64, total: f64, ppp: f32) {
+/// Says a category's value, its percent of the total, or both, at (`x`, `y`) aligned as `align`
+/// says, in a small haloed dark text (7 pt, as the map's finest labels are).
+#[allow(clippy::too_many_arguments)]
+fn label_at(pm: &mut Pixmap, x: f32, y: f32, mode: DiagramLabel, v: f64, total: f64, ppp: f32, align: crate::text::Align) {
     if !(x.is_finite() && y.is_finite()) {
         return;
     }
@@ -209,7 +218,7 @@ fn label_at(pm: &mut Pixmap, x: f32, y: f32, mode: DiagramLabel, v: f64, total: 
         DiagramLabel::Percent => percent(v, total),
         DiagramLabel::Both => format!("{} ({})", rustgis_map::symbology::fmt_num(v), percent(v, total)),
     };
-    crate::text::text_at(pm, &text, x, y, 7.0 * 1.33 * ppp, dark, false, crate::text::Align::Center, true);
+    crate::text::text_at(pm, &text, x, y, 7.0 * 1.33 * ppp, dark, false, align, true);
 }
 
 /// A share of `total` in percent: a whole number, or one decimal below ten percent.
@@ -390,6 +399,21 @@ mod tests {
     }
 
     #[test]
+    fn a_label_beside_the_pie_clears_its_side() {
+        // The slices' mid-angles sit at 3 and 9 o'clock: their labels start past the right side and
+        // end before the left, so the band 1 to 4 points past the crust, level with the centre,
+        // is clear of text.
+        let mut pm = Pixmap::new(96, 96).unwrap();
+        let d = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
+        draw(&mut pm, 48.0, 48.0, &d, &[(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])], 100_000.0, 1.0, 1.0, false);
+        let on_the_band = pm.pixels().iter().enumerate().filter(|(_, p)| p.alpha() > 0).any(|(i, _)| {
+            let (dx, dy) = ((i % 96) as f32 + 0.5 - 48.0, (i / 96) as f32 + 0.5 - 48.0);
+            dy.abs() < 4.0 && (21.0..24.0).contains(&dx.abs())
+        });
+        assert!(!on_the_band, "a label beside the pie runs away from its crust, not onto it");
+    }
+
+    #[test]
     fn a_paused_label_display_draws_no_value_labels() {
         let values = [(52_000.0, CATEGORY_COLORS[0]), (48_000.0, CATEGORY_COLORS[1])];
         let labelled = DiagramSettings { labels: DiagramLabel::Percent, ..settings(DiagramKind::Pie) };
@@ -398,6 +422,13 @@ mod tests {
         let mut bare = Pixmap::new(96, 96).unwrap();
         draw(&mut bare, 48.0, 48.0, &settings(DiagramKind::Pie), &values, 100_000.0, 1.0, 1.0, false);
         assert!(paused.data() == bare.data(), "the chart draws as it would with no labels");
+    }
+
+    #[test]
+    fn a_multipoint_anchors_at_its_first_finite_point() {
+        let m = Geometry::MultiPoint(vec![Coord::new(f64::NAN, 0.0), Coord::new(3.0, 4.0)]);
+        assert!(anchor(&m).is_some_and(|c| c.x == 3.0 && c.y == 4.0), "a point that projected to nothing is passed over");
+        assert!(anchor(&Geometry::MultiPoint(vec![Coord::new(f64::NAN, f64::NAN)])).is_none());
     }
 
     #[test]

@@ -392,7 +392,7 @@ share of the range, as Proportional Symbols grow. By command:
 
 ```text
 layer.diagram={"layer":"Regions","kind":"pie","fields":["pop_male","pop_female"]}
-layer.diagram={"kind":"bar","fields":[{"field":"under18","color":"#4A90D9"},{"field":"over65","color":"#E07B39"}],"size":{"from":6,"to":40},"startAngle":90,"labels":"both","background":"#FFFFFFCC","outline":{"color":"#4D4D4D","width":0.75}}
+layer.diagram={"kind":"bar","fields":[{"field":"under18","color":"#4A90D9"},{"field":"over65","color":"#E07B39"}],"size":{"from":6,"to":40},"labels":"both","background":"#FFFFFFCC","outline":{"color":"#4D4D4D","width":0.75}}
 layer.diagramInfo={"layer":"Regions"}
 layer.clearDiagram={"layer":"Regions"}
 ```
